@@ -9,8 +9,9 @@ build/
 *.egg-info/
 
 # Runtime data
-data/
+/data/
 checkpoints/
+exports/
 runs/
 logs/
 

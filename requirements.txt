@@ -1,0 +1,7 @@
+torch>=2.5
+datasets>=3.0
+huggingface-hub>=0.34
+pydantic>=2.9
+PyYAML>=6.0
+tensorboard>=2.18
+tokenizers>=0.20
