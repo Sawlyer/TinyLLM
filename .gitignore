@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Runtime data
+/data/
+datasets/
+artifacts/
+weights/
+models/
+checkpoints/
+runs/
+logs/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.gguf
+*.onnx
+*.model
+
+# AI assistant instructions, sessions, and generated work
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+*.prompt.md
+.claude/
+.cursor/
+.continue/
+.aider*
+.windsurf/
+.github/copilot-instructions.md
+
+# Local tooling and isolated workspaces
+.worktrees/
+.superpowers/
+.codex/
+.agents/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
