@@ -41,6 +41,7 @@ GEMINI.md
 .worktrees/
 .superpowers/
 .codex/
+.codebase-memory/
 .agents/
 
 # Editors and operating systems
