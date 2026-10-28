@@ -145,6 +145,8 @@ from the latest periodic `step-*.pt` checkpoint.
 
 Inspect saved checkpoints before cleaning a directory. `list` only reads file names, sizes, and
 timestamps; `inspect` validates and deserializes one checkpoint on CPU without constructing a model:
+Inspection et plan de rétention chargent chaque checkpoint vérifié en mémoire CPU; prévoir une RAM
+au moins comparable à la taille du plus gros fichier.
 
 ```powershell
 uv run tinyllm checkpoints list --directory checkpoints
