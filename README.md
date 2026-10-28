@@ -172,6 +172,11 @@ of token-weighted mean loss and has no unit. JSON and CSV output refuse to repla
 unless `--overwrite` is passed. Human-readable lines go to stderr; stdout remains one JSON object
 for scripts. The JSON keeps the existing `validation_loss` and `validation_perplexity` fields.
 
+For repeat runs with the same checkpoint, corpus, split, seed, batch or token limit, device, dtype,
+PyTorch version, and CUDA runtime, compare floating-point results with relative tolerance `1e-4`
+and absolute tolerance `1e-6`. This tolerance does not promise equivalence across devices, dtypes,
+or software versions.
+
 One-off overrides use validated dotted YAML scalars:
 
 ```powershell
