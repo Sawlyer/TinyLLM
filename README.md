@@ -8,6 +8,19 @@ stage inspectable, from corpus checksums to grouped-query attention and atomic c
 Current default configuration contains 39,854,592 trainable parameters. `tinyllm train
 --dry-run` computes this value from configuration instead of relying on a stale estimate.
 
+```mermaid
+flowchart LR
+    source["Text source"] --> prepare["prepare"]
+    prepare --> corpus["Checksummed corpus and tokenizer"]
+    corpus --> train["train or resume"]
+    train --> checkpoint["Checkpoint"]
+    train --> metrics["JSONL, CSV, TensorBoard"]
+    train --> manifest["Run manifest"]
+    checkpoint --> evaluate["evaluate"]
+    checkpoint --> generate["generate"]
+    checkpoint --> export["quantize and validate"]
+```
+
 ## What is included
 
 - streaming preparation from `codelion/fineweb-edu-100M`, with deterministic train/validation
@@ -15,7 +28,7 @@ Current default configuration contains 39,854,592 trainable parameters. `tinyllm
 - pre-norm Transformer blocks with RMSNorm, RoPE, grouped-query attention, SwiGLU, tied input
   and output embeddings, and one KV cache per layer;
 - single-device training with FP32, FP16, BF16, or optional FP8, gradient accumulation,
-  validation metrics, TensorBoard logs, atomic checkpoints, and deterministic resume;
+  validation metrics in JSONL/CSV and TensorBoard, atomic checkpoints, and deterministic resume;
 - greedy or sampled generation with rolling context, precision comparison, and reload-verified
   BF16, FP16, INT8, or INT4 inference exports;
 - CPU test suite plus separately marked CUDA smoke tests.
@@ -115,6 +128,28 @@ from checkpoint; pass `--config` when intentionally validating against external 
 Default configuration keeps `training.max_steps: 10000`; first command stops early through CLI
 without changing checkpoint configuration snapshot. Resume therefore remains configuration-compatible
 and continues toward step 10000.
+
+### Training metrics
+
+Each training report appends one record to `runs/metrics.jsonl` and one row to
+`runs/metrics.csv`. TensorBoard remains available in `runs/tensorboard`. JSONL and CSV flush after
+each report. A CSV schema change adds columns while preserving earlier rows.
+
+`timestamp_utc` is the record time in ISO 8601 UTC. `run_id` matches `runs/run.json`; `session_id`
+identifies one training process. Resuming keeps the run ID and starts a new session, so repeated
+step numbers remain distinguishable. Steps increase within each session.
+
+- `loss`, `validation_loss`: mean training loss and latest validation loss, unitless. `validation_step`
+  gives the step used for that validation value. Perplexity fields are exponentiated losses.
+- `learning_rate`: optimizer learning rate at the reported step. `gradient_norm`: gradient norm
+  before clipping.
+- `tokens_processed`: cumulative tokens in the run. `tokens_per_second` and `sequences_per_second`
+  cover the training interval since the previous report; validation and metric writes are excluded.
+- `data_loading_seconds`: time spent waiting for prefetched training batches in that interval.
+  `evaluation_seconds`: time spent evaluating validation data in the interval.
+- `elapsed_seconds`: wall time since the current session started. `peak_vram_bytes`: peak allocated
+  CUDA memory since the last reset. `cuda_free_memory_bytes` and `cuda_total_memory_bytes` record
+  free and total CUDA memory at report time; CUDA fields are absent on CPU runs.
 
 One-off overrides use validated dotted YAML scalars:
 
