@@ -1,4 +1,6 @@
 import json
+import csv
+from types import SimpleNamespace
 import math
 from pathlib import Path
 
@@ -92,6 +94,8 @@ def _datasets(tmp_path: Path, *, seed: int = 7) -> tuple[TokenDataset, TokenData
         },
         document_counts={"train": 1, "validation": 1},
         artifacts=artifacts,
+        tokenizer_vocab_size=8,
+        special_token_ids={"<unk>": 0, "<bos>": 1, "<eos>": 2, "<pad>": 3},
     )
     return (
         TokenDataset(manifest, "train", 4, seed, artifact_dir=output_dir),
@@ -164,8 +168,28 @@ def test_training_writes_jsonl_and_tensorboard_metrics(
     records = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert records[-1]["step"] == 2
     assert records[-1]["tokens_processed"] > 0
+    assert records[-1]["run_id"]
+    assert records[-1]["session_id"]
+    assert records[-1]["sequences_per_second"] > 0
+    assert records[-1]["data_loading_seconds"] >= 0
+    assert records[-1]["evaluation_seconds"] >= 0
+    assert records[-1]["validation_step"] == 2
+    with (run_dir / "metrics.csv").open(encoding="utf-8", newline="") as stream:
+        csv_records = list(csv.DictReader(stream))
+    assert csv_records[-1]["step"] == "2"
+    assert float(csv_records[-1]["sequences_per_second"]) > 0
     assert records[-1]["learning_rate"] > 0
     assert list((run_dir / "tensorboard").glob("events.out.tfevents.*"))
+
+
+def test_cuda_memory_metrics_records_free_and_total_memory(monkeypatch) -> None:
+    fake_trainer = SimpleNamespace(device=torch.device("cuda"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (1024, 4096))
+
+    assert Trainer._cuda_memory_metrics(fake_trainer) == {
+        "cuda_free_memory_bytes": 1024,
+        "cuda_total_memory_bytes": 4096,
+    }
 
 
 def test_gradient_accumulation_is_normalized_to_effective_batch(tmp_path: Path) -> None:
