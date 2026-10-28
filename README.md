@@ -139,6 +139,18 @@ Default configuration keeps `training.max_steps: 10000`; first command stops ear
 without changing checkpoint configuration snapshot. Resume therefore remains configuration-compatible
 and continues toward step 10000.
 
+Training checkpoints use a versioned format and retain producer and UTC creation metadata. Legacy
+v2/v3 files migrate in memory when read; unsupported future formats return an upgrade instruction.
+Inference exports use a separate weights-only artifact without optimizer or RNG state:
+
+```powershell
+uv run tinyllm export-weights --checkpoint checkpoints/latest.pt --output exports/tinyllm-weights.pt
+uv run tinyllm generate --checkpoint exports/tinyllm-weights.pt --prompt "Once upon a time"
+```
+
+Training resume rejects inference-only weights. Both artifact types remain readable by `generate`
+and `evaluate`; existing training checkpoints remain valid inference inputs.
+
 `Ctrl+C` and `SIGTERM` finish the current optimizer step, write a resumable `interrupt.pt` in the
 checkpoint directory, then stop. Abrupt termination that cannot deliver a signal can only resume
 from the latest periodic `step-*.pt` checkpoint.
