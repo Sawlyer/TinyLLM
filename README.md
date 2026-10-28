@@ -485,6 +485,30 @@ state, compilation cache, and background load change measurements. Treat a small
 as inconclusive unless repeated runs support it. Investigate non-finite loss or correctness failures
 separately from performance.
 
+## ONNX forward export
+
+Install the optional CPU export and runtime dependencies, then export a checkpoint:
+
+```powershell
+uv sync --extra dev --extra onnx
+uv run tinyllm export-onnx --checkpoint checkpoints/resumed.pt --output exports/tinyllm.onnx
+```
+
+The graph accepts `int64` token IDs with dynamic batch and sequence dimensions. Sequence length
+must stay between 1 and the checkpoint's `max_seq_len`. It returns FP32 logits for every input
+position and supports opset 18. ONNX Runtime CPU checks each export against PyTorch on multiple
+shapes before publishing the file. The optional extra uses the CPU execution provider; accelerated
+providers require a separately installed, compatible ONNX Runtime package and remain unverified.
+The exporter follows the [PyTorch ONNX export guide](https://docs.pytorch.org/docs/stable/onnx.html);
+ONNX Runtime's [execution provider documentation](https://onnxruntime.ai/docs/execution-providers/)
+explains hardware-specific runtimes.
+
+The ONNX file embeds model configuration, source checkpoint and tokenizer SHA-256 values, shape
+limits, opset, and validation results. Tokenization stays outside the graph; pass token IDs from
+the exact tokenizer recorded in that metadata. The export has no KV cache and does not implement
+generation: callers must run the full context again for each next-token step. This is a portable
+forward graph, not a fast autoregressive serving format.
+
 ## Limitations
 
 - single process and single device; no distributed training;
