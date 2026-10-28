@@ -154,7 +154,7 @@ chat-style format only works when the model's training data taught it that forma
 configured warmup steps are excluded from measured summaries; model/dataset setup is timed
 separately. The report includes
 tokens/second, batch loading and transfer time, model/optimizer time, validation time, allocated and
-reserved CUDA memory, device and library versions, and profiler overhead. PyTorch operator scopes
+reserved CUDA memory, device and library versions, and total profiling duration. PyTorch operator scopes
 separate forward, backward, optimizer, data loading, and validation. `--trace` exports an optional
 Chrome trace. Profile updates stay in memory; logs and checkpoints use a temporary directory and
 are discarded when the command exits. CUDA transfer timing synchronizes before and after each
