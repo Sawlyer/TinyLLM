@@ -23,7 +23,7 @@ from tinyllm.data.loader import (
     build_document_masks,
 )
 from tinyllm.data.validation import validate_dataset_for_model
-from tinyllm.model.transformer import TinyLLM
+from tinyllm.model.transformer import ModelOutput, TinyLLM
 from tinyllm.training import checkpoint as checkpointing
 from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.optim import build_optimizer, cosine_lr
@@ -605,7 +605,7 @@ class Trainer:
             raise ValueError("validation dataset must contain at least one window")
         return total_loss / total_examples
 
-    def _forward_training_batch(self, inputs: Tensor, targets: Tensor):
+    def _forward_training_batch(self, inputs: Tensor, targets: Tensor) -> ModelOutput:
         if not self.isolate_documents:
             return self._training_model(inputs, targets)
         if self.eos_token_id is None:
