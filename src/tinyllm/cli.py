@@ -33,10 +33,15 @@ from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_preci
 from tinyllm.training.checkpoint import (
     ArtifactIdentity,
     TrainingState,
+    inspect_checkpoint,
     load_model_checkpoint,
 )
 from tinyllm.training.checkpoint import (
     load_checkpoint as load_training_checkpoint,
+)
+from tinyllm.training.checkpoint_manager import (
+    list_checkpoint_files,
+    plan_checkpoint_retention,
 )
 from tinyllm.training.evaluation import evaluate_model, write_evaluation_report
 from tinyllm.training.metrics import MetricLogger
@@ -148,7 +153,115 @@ def _build_parser() -> argparse.ArgumentParser:
     quantize.add_argument("--device")
     quantize.add_argument("--overwrite", action="store_true")
     quantize.set_defaults(handler=_quantize_command)
+
+    checkpoints = commands.add_parser(
+        "checkpoints", help="list, inspect, and preview checkpoint retention"
+    )
+    checkpoint_commands = checkpoints.add_subparsers(dest="checkpoint_command", required=True)
+
+    checkpoint_list = checkpoint_commands.add_parser(
+        "list", help="list checkpoint files without loading tensor contents"
+    )
+    checkpoint_list.add_argument("--directory", type=Path, required=True)
+    checkpoint_list.set_defaults(handler=_checkpoints_list_command)
+
+    checkpoint_inspect = checkpoint_commands.add_parser(
+        "inspect", help="validate one checkpoint and show its metadata"
+    )
+    checkpoint_inspect.add_argument("--checkpoint", type=Path, required=True)
+    checkpoint_inspect.set_defaults(handler=_checkpoint_inspect_command)
+
+    checkpoint_prune = checkpoint_commands.add_parser(
+        "prune", help="preview deterministic checkpoint retention; --apply deletes files"
+    )
+    checkpoint_prune.add_argument("--directory", type=Path, required=True)
+    checkpoint_prune.add_argument("--metrics", type=Path)
+    checkpoint_prune.add_argument("--metric", default="validation_loss")
+    checkpoint_prune.add_argument("--mode", choices=("min", "max"), default="min")
+    checkpoint_prune.add_argument("--run-id")
+    checkpoint_prune.add_argument("--keep-last", type=int, default=2)
+    checkpoint_prune.add_argument("--keep-every", type=int)
+    checkpoint_prune.add_argument("--apply", action="store_true")
+    checkpoint_prune.set_defaults(handler=_checkpoint_prune_command)
     return parser
+
+
+def _checkpoints_list_command(args: argparse.Namespace) -> None:
+    files = list_checkpoint_files(args.directory)
+    print(
+        json.dumps(
+            [
+                {
+                    "path": str(item.path),
+                    "step": item.step,
+                    "size_bytes": item.size_bytes,
+                    "modified_utc": datetime.fromtimestamp(
+                        item.modified_time_ns / 1_000_000_000, UTC
+                    ).isoformat(),
+                }
+                for item in files
+            ],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def _checkpoint_inspect_command(args: argparse.Namespace) -> None:
+    info = inspect_checkpoint(args.checkpoint)
+    print(
+        json.dumps(
+            {
+                "path": str(info.path),
+                "size_bytes": info.size_bytes,
+                "step": info.step,
+                "tokens_processed": info.tokens_processed,
+                "status": info.status,
+                "reason": info.reason,
+                "model_config": info.model_config,
+                "tokenizer_sha256": info.tokenizer_sha256,
+                "corpus_sha256": info.corpus_sha256,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def _checkpoint_prune_command(args: argparse.Namespace) -> None:
+    metrics_file = args.metrics or args.directory.parent / "metrics.jsonl"
+    decisions = plan_checkpoint_retention(
+        args.directory,
+        metrics_file=metrics_file,
+        metric=args.metric,
+        mode=args.mode,
+        keep_last=args.keep_last,
+        keep_every=args.keep_every,
+        run_id=args.run_id,
+    )
+    plan = [
+        {
+            "action": "keep" if decision.keep else "delete",
+            "path": str(decision.path),
+            "step": decision.step,
+            "size_bytes": decision.size_bytes,
+            "resumable": decision.resumable,
+            "reason": list(decision.keep_reasons) if decision.keep else decision.inspection_error,
+        }
+        for decision in decisions
+    ]
+    print(json.dumps({"apply": args.apply, "plan": plan}, indent=2, sort_keys=True))
+    if not args.apply:
+        return
+    deleted: list[str] = []
+    for decision in decisions:
+        if decision.keep:
+            continue
+        if decision.path.is_symlink():
+            raise ValueError(f"checkpoint symlinks are not supported: {decision.path}")
+        decision.path.unlink()
+        deleted.append(str(decision.path))
+    print(json.dumps({"deleted": deleted}, indent=2, sort_keys=True))
 
 
 def _add_config_arguments(
