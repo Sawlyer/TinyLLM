@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -266,6 +267,10 @@ def _benchmark_configuration(
 
 
 def _benchmark_environment(device: torch.device) -> dict[str, object]:
+    try:
+        torchao_version = version("torchao")
+    except PackageNotFoundError:
+        torchao_version = None
     environment: dict[str, object] = {
         "device": str(device),
         "platform": platform.platform(),
@@ -273,6 +278,7 @@ def _benchmark_environment(device: torch.device) -> dict[str, object]:
         "python_version": platform.python_version(),
         "torch_version": str(torch.__version__),
         "cuda_runtime_version": torch.version.cuda,
+        "torchao_version": torchao_version,
     }
     if device.type == "cuda":
         properties = torch.cuda.get_device_properties(device)
