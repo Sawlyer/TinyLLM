@@ -399,3 +399,29 @@ def test_resume_restores_matching_archived_manifest(monkeypatch, tmp_path):
     assert resumed["config"] == first["config"]
     assert resumed["resume_history"][-1]["started_at"] == "2026-10-28T12:04:00Z"
 
+
+def test_resume_does_not_reuse_running_manifest_for_unmatched_checkpoint(tmp_path):
+    config = _config()
+    checkpoint_dir = tmp_path / "checkpoints"
+    config = config.model_copy(
+        update={
+            "logging": config.logging.model_copy(update={"run_dir": tmp_path / "runs"}),
+            "training": config.training.model_copy(update={"checkpoint_dir": checkpoint_dir}),
+        }
+    )
+    initial_args = argparse.Namespace(command="train", resume=None)
+    _, initial = run_manifest.start_run_manifest(
+        config, initial_args, started_at="2026-10-28T12:00:00Z"
+    )
+    unrelated_checkpoint = checkpoint_dir / "stale.pt"
+    unrelated_checkpoint.parent.mkdir(parents=True)
+    unrelated_checkpoint.write_bytes(b"checkpoint from another run")
+
+    _, resumed = run_manifest.start_run_manifest(
+        config,
+        argparse.Namespace(command="train", resume=unrelated_checkpoint),
+        started_at="2026-10-28T12:05:00Z",
+    )
+
+    assert resumed["run_id"] != initial["run_id"]
+
