@@ -263,12 +263,13 @@ def _spool_documents(
                 if explicit_id is not None
                 else hashlib.sha256(normalized.encode("utf-8")).hexdigest()
             )
-            split = split_for_id(
+            proposed_split = split_for_id(
                 document_id,
                 seed=config.data.seed,
                 validation_fraction=config.data.validation_fraction,
             )
-            if not quality.record(normalized, split):
+            split = quality.resolve_split(normalized, proposed_split)
+            if not quality.record(normalized, split, proposed_split=proposed_split):
                 _update_source_digest(source_digest, document_id, normalized)
                 continue
             _update_source_digest(source_digest, document_id, normalized)

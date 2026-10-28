@@ -12,6 +12,7 @@ from tinyllm.config.schema import TinyLLMConfig
 from tinyllm.data.prepare import _spool_documents
 from tinyllm.data.prepare import prepare_corpus
 from tinyllm.data.quality import CorpusQualityOptions, StreamingCorpusQuality
+from tinyllm.data.split import split_for_id
 
 
 def test_quality_report_counts_streamed_documents_and_filters_short_text(tmp_path):
@@ -138,6 +139,24 @@ def test_spooling_filters_after_deterministic_split_and_reports_counts(tmp_path)
     assert report["blank_documents"] == 1
     assert report["invalid_records"] == 1
     assert sum(item["documents_filtered"] for item in report["splits"].values()) == 1
+
+
+def test_spooling_keeps_exact_duplicate_content_in_one_split(tmp_path):
+    config = SimpleNamespace(
+        data=SimpleNamespace(text_field="text", seed=42, validation_fraction=0.5)
+    )
+    train_id = "train-0"
+    validation_id = "validation-1"
+    assert split_for_id(train_id, 42, 0.5) != split_for_id(validation_id, 42, 0.5)
+    documents = [
+        {"id": train_id, "text": "An identical document with enough useful content."},
+        {"id": validation_id, "text": "An identical document with enough useful content."},
+    ]
+
+    counts, _, report = _spool_documents(documents, config, tmp_path)
+
+    assert sorted(counts.values()) == [0, 2]
+    assert report["exact_split_conflicts_prevented"] == 1
 
 
 def test_prepare_publishes_report_and_rejects_changed_cached_filters(tmp_path):
