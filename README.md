@@ -104,11 +104,10 @@ is set; existing reports require `--overwrite`.
 lengths, language guesses, exact duplicates, and near duplicates per train/validation split while
 streaming. Filters stay disabled by default. Opt-in flags can remove short/long documents, repeated
 character runs or repeated word sequences, unexpected languages, exact duplicates, or approximate
-near duplicates. The
-language detector is a lightweight marker heuristic, and near duplicates use bounded disk-backed
-SimHash candidates; review the report before adopting aggressive thresholds. Filtering happens
-after deterministic split assignment, so it never moves documents between splits. Changing quality
-filters for already prepared artifacts requires `--overwrite`.
+near duplicates. Language detection uses a lightweight marker heuristic; near duplicates use a
+bounded disk-backed SimHash index. Review the report before adopting aggressive thresholds.
+Filtering happens after deterministic split assignment, so it never moves documents between splits.
+Changing quality filters for already prepared artifacts requires `--overwrite`.
 
 Outputs never overwrite by default. Rebuilding intentional dataset requires explicit
 `--overwrite`. For offline smoke run, set `data.dataset_name` to local UTF-8 text file; each
