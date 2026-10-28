@@ -13,12 +13,17 @@ from tinyllm.config.load import load_config
 from tinyllm.config.schema import TinyLLMConfig
 from tinyllm.data.artifacts import MANIFEST_VERSION, CorpusManifest, write_token_artifact
 from tinyllm.data.loader import TokenDataset
+from tinyllm.errors import CheckpointCompatibilityError, CheckpointFormatError
 from tinyllm.model.transformer import TinyLLM
+from tinyllm.training import checkpoint as checkpoint_module
 from tinyllm.training.checkpoint import (
     ArtifactIdentity,
     TrainingState,
+    inspect_checkpoint,
     load_checkpoint,
+    load_model_checkpoint,
     save_checkpoint,
+    save_model_checkpoint,
 )
 from tinyllm.training.trainer import Trainer
 
@@ -184,6 +189,83 @@ def test_checkpoint_round_trip_preserves_complete_training_state(tmp_path: Path)
         loaded.loader_rng_state["generator_state"],
         state.loader_rng_state["generator_state"],
     )
+
+
+@pytest.mark.parametrize("legacy_version", [2, 3])
+def test_legacy_checkpoint_versions_migrate_in_memory(
+    tmp_path: Path, legacy_version: int
+) -> None:
+    state = _checkpoint_state()
+    payload = checkpoint_module._state_to_payload(state)
+    for field in checkpoint_module._FORMAT_METADATA_FIELDS:
+        payload.pop(field)
+    payload["version"] = legacy_version
+    if legacy_version == 2:
+        payload.pop("status")
+        payload.pop("reason")
+    path = tmp_path / f"legacy-v{legacy_version}.pt"
+    torch.save(payload, path)
+
+    loaded = load_checkpoint(path, state.identity)
+    inspection = inspect_checkpoint(path)
+
+    assert loaded.step == state.step
+    assert inspection.migrated_from_version == legacy_version
+    assert inspection.format_version == checkpoint_module.CHECKPOINT_FORMAT_VERSION
+    assert inspection.created_at_utc is None
+    assert inspection.producer_version is None
+
+
+def test_future_checkpoint_format_has_upgrade_guidance(tmp_path: Path) -> None:
+    state = _checkpoint_state()
+    path = tmp_path / "future.pt"
+    save_checkpoint(path, state)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["format_version"] = checkpoint_module.CHECKPOINT_FORMAT_VERSION + 1
+    torch.save(payload, path)
+
+    with pytest.raises(CheckpointCompatibilityError, match="upgrade TinyLLM"):
+        load_checkpoint(path, state.identity)
+
+
+def test_corrupt_checkpoint_reports_a_format_error(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt.pt"
+    path.write_bytes(b"not a checkpoint")
+
+    with pytest.raises(CheckpointFormatError, match="invalid checkpoint"):
+        inspect_checkpoint(path)
+
+
+def test_inference_weights_are_separate_and_cannot_resume_training(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    model = TinyLLM(config.model)
+    identity = ArtifactIdentity(
+        model_config=config.model.model_dump(mode="json"),
+        tokenizer_sha256=TOKENIZER_SHA256,
+        corpus_sha256="b" * 64,
+    )
+    path = tmp_path / "inference-weights.pt"
+
+    save_model_checkpoint(
+        path,
+        model,
+        config_snapshot=config.model_dump(mode="json"),
+        identity=identity,
+        step=12,
+        tokens_processed=384,
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    loaded = load_model_checkpoint(path)
+
+    assert payload["artifact_type"] == checkpoint_module.INFERENCE_WEIGHTS_TYPE
+    assert "optimizer_state" not in payload
+    assert "scheduler_state" not in payload
+    assert "python_rng_state" not in payload
+    assert loaded.step == 12
+    assert loaded.artifact_type == checkpoint_module.INFERENCE_WEIGHTS_TYPE
+    _assert_state_dict_equal(model.state_dict(), loaded.model.state_dict())
+    with pytest.raises(CheckpointCompatibilityError, match="inference-only weights"):
+        load_checkpoint(path, identity)
 
 
 @pytest.mark.parametrize(
@@ -588,3 +670,4 @@ def _assert_nested_equal(left: Any, right: Any) -> None:
             _assert_nested_equal(left_item, right_item)
         return
     assert left == right
+
