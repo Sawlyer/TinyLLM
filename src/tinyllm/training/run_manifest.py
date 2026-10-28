@@ -181,15 +181,10 @@ def start_run_manifest(
     resume_sha = _file_sha256(resume_path) if isinstance(resume_path, Path) else None
     matching_manifest: tuple[Path, dict[str, object]] | None = None
     if resume_sha is not None and isinstance(resume_path, Path):
-        checkpoint_dir = config.training.checkpoint_dir.resolve(strict=False)
         for candidate_path, candidate_payload in loaded_manifests:
             artifacts = candidate_payload.get("artifacts")
             has_matching_artifact = isinstance(artifacts, dict) and resume_sha in artifacts.values()
-            interrupted_in_checkpoint_dir = (
-                candidate_payload.get("status") == "running"
-                and resume_path.resolve(strict=False).parent == checkpoint_dir
-            )
-            if has_matching_artifact or interrupted_in_checkpoint_dir:
+            if has_matching_artifact:
                 matching_manifest = (candidate_path, candidate_payload)
                 break
 
