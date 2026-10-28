@@ -210,3 +210,60 @@ def test_train_command_marks_manifest_failed_when_training_raises(monkeypatch, t
     assert manifest["status"] == "failed"
     assert manifest["finished_at"] is not None
 
+
+def test_resume_restores_matching_archived_manifest(monkeypatch, tmp_path):
+    config = _config()
+    checkpoint_dir = tmp_path / "checkpoints"
+    config = config.model_copy(
+        update={
+            "logging": config.logging.model_copy(update={"run_dir": tmp_path / "runs"}),
+            "training": config.training.model_copy(update={"checkpoint_dir": checkpoint_dir}),
+        }
+    )
+    monkeypatch.setattr(run_manifest, "_git_revision", lambda: "abc1234")
+    monkeypatch.setattr(run_manifest, "_runtime_metadata", lambda: {"python": "3.12.1"})
+    monkeypatch.setattr(run_manifest, "_system_metadata", lambda: {"system": "Windows"})
+    monkeypatch.setattr(run_manifest, "_accelerator_name", lambda: None)
+
+    first_checkpoint = checkpoint_dir / "first.pt"
+    first_args = argparse.Namespace(command="train", checkpoint=first_checkpoint, resume=None)
+    first_path, first = run_manifest.start_run_manifest(
+        config, first_args, started_at="2026-10-28T12:00:00Z"
+    )
+    first_checkpoint.parent.mkdir(parents=True)
+    first_checkpoint.write_bytes(b"first-checkpoint")
+    run_manifest.finish_run_manifest(
+        first_path,
+        first,
+        config,
+        first_args,
+        status="completed",
+        finished_at="2026-10-28T12:01:00Z",
+    )
+
+    second_checkpoint = checkpoint_dir / "second.pt"
+    second_args = argparse.Namespace(command="train", checkpoint=second_checkpoint, resume=None)
+    second_path, second = run_manifest.start_run_manifest(
+        config, second_args, started_at="2026-10-28T12:02:00Z"
+    )
+    second_checkpoint.write_bytes(b"second-checkpoint")
+    run_manifest.finish_run_manifest(
+        second_path,
+        second,
+        config,
+        second_args,
+        status="completed",
+        finished_at="2026-10-28T12:03:00Z",
+    )
+
+    resume_args = argparse.Namespace(
+        command="train", checkpoint=second_checkpoint, resume=first_checkpoint
+    )
+    _, resumed = run_manifest.start_run_manifest(
+        config, resume_args, started_at="2026-10-28T12:04:00Z"
+    )
+
+    assert resumed["run_id"] == first["run_id"]
+    assert resumed["config"] == first["config"]
+    assert resumed["resume_history"][-1]["started_at"] == "2026-10-28T12:04:00Z"
+

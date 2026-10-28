@@ -102,10 +102,9 @@ def _artifact_digests(config: TinyLLMConfig, args: argparse.Namespace) -> dict[s
     for name, value in vars(args).items():
         if isinstance(value, Path) and value.is_file():
             candidates[f"arguments.{name}"] = value
-    if config.training.checkpoint_dir.is_dir():
-        for path in config.training.checkpoint_dir.glob("*.pt"):
-            if path.is_file():
-                candidates[f"checkpoints.{path.name}"] = path
+    interrupt_checkpoint = config.training.checkpoint_dir / "interrupt.pt"
+    if interrupt_checkpoint.is_file():
+        candidates["checkpoints.interrupt"] = interrupt_checkpoint
 
     digests: dict[str, str] = {}
     for name, path in sorted(candidates.items()):
@@ -121,50 +120,77 @@ def start_run_manifest(
     run_root = config.logging.run_dir
     manifest_path = run_root / "run.json"
     run_root.mkdir(parents=True, exist_ok=True)
+    manifest_candidates = [manifest_path]
+    manifest_candidates.extend(
+        sorted(
+            run_root.glob("run-*.json"),
+            key=lambda candidate: candidate.stat().st_mtime_ns,
+            reverse=True,
+        )
+    )
     previous: dict[str, object] | None = None
-    if manifest_path.is_file():
+    previous_path: Path | None = None
+    current_manifest: dict[str, object] | None = None
+    loaded_manifests: list[tuple[Path, dict[str, object]]] = []
+    for candidate in manifest_candidates:
+        if not candidate.is_file():
+            continue
         try:
-            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            loaded = None
+            continue
         if isinstance(loaded, dict):
-            previous = loaded
+            loaded_manifests.append((candidate, loaded))
+    if loaded_manifests:
+        previous_path, previous = loaded_manifests[0]
+        if previous_path == manifest_path:
+            current_manifest = previous
 
     resume_path = getattr(args, "resume", None)
     resume_sha = _file_sha256(resume_path) if isinstance(resume_path, Path) else None
-    prior_artifacts = previous.get("artifacts") if previous is not None else None
-    can_resume = (
-        resume_sha is not None
-        and isinstance(prior_artifacts, dict)
-        and resume_sha in prior_artifacts.values()
-    )
-    if can_resume and previous is not None:
+    matching_manifest: tuple[Path, dict[str, object]] | None = None
+    if resume_sha is not None and isinstance(resume_path, Path):
+        checkpoint_dir = config.training.checkpoint_dir.resolve(strict=False)
+        for candidate_path, candidate_payload in loaded_manifests:
+            artifacts = candidate_payload.get("artifacts")
+            has_matching_artifact = isinstance(artifacts, dict) and resume_sha in artifacts.values()
+            interrupted_in_checkpoint_dir = (
+                candidate_payload.get("status") == "running"
+                and resume_path.resolve(strict=False).parent == checkpoint_dir
+            )
+            if has_matching_artifact or interrupted_in_checkpoint_dir:
+                matching_manifest = (candidate_path, candidate_payload)
+                break
+
+    if matching_manifest is not None:
+        previous_path, previous = matching_manifest
+        if previous_path != manifest_path and manifest_path.is_file():
+            if current_manifest is not None:
+                _archive_current_manifest(manifest_path, current_manifest)
         payload = previous
         history = payload.setdefault("resume_history", [])
-        if isinstance(history, list):
-            history.append(
-                {
-                    "started_at": started_at,
-                    "arguments": _portable_value(
-                        {
-                            name: value
-                            for name, value in vars(args).items()
-                            if name not in {"handler", "func"}
-                        },
-                        Path(__file__).resolve().parents[3],
-                    ),
-                }
-            )
+        if not isinstance(history, list):
+            history = []
+            payload["resume_history"] = history
+        history.append(
+            {
+                "started_at": started_at,
+                "checkpoint_sha256": resume_sha,
+                "arguments": _portable_value(
+                    {
+                        name: value
+                        for name, value in vars(args).items()
+                        if name not in {"handler", "func"}
+                    },
+                    Path(__file__).resolve().parents[3],
+                ),
+            }
+        )
         payload["status"] = "running"
         payload["finished_at"] = None
     else:
-        if previous is not None:
-            previous_id = previous.get("run_id")
-            if isinstance(previous_id, str):
-                archive_path = run_root / f"run-{previous_id}.json"
-                if archive_path.exists():
-                    archive_path = run_root / f"run-{previous_id}-{uuid.uuid4().hex[:8]}.json"
-                shutil.copy2(manifest_path, archive_path)
+        if current_manifest is not None:
+            _archive_current_manifest(manifest_path, current_manifest)
         payload = build_run_manifest(
             config,
             args,
@@ -176,6 +202,16 @@ def start_run_manifest(
     payload["finished_at"] = None
     write_run_manifest(manifest_path, payload)
     return manifest_path, payload
+
+
+def _archive_current_manifest(path: Path, payload: Mapping[str, object]) -> None:
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not path.is_file():
+        return
+    archive_path = path.parent / f"run-{run_id}.json"
+    if archive_path.exists():
+        archive_path = path.parent / f"run-{run_id}-{uuid.uuid4().hex[:8]}.json"
+    shutil.copy2(path, archive_path)
 
 
 def _file_sha256(path: Path) -> str | None:
