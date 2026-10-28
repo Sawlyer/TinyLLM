@@ -228,6 +228,29 @@ def test_future_checkpoint_format_has_upgrade_guidance(tmp_path: Path) -> None:
         load_checkpoint(path, state.identity)
 
 
+def test_current_checkpoint_requires_all_format_metadata(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    model = TinyLLM(config.model)
+    state = _checkpoint_state()
+    state = replace(
+        state,
+        model_state=model.state_dict(),
+        config_snapshot=config.model_dump(mode="json"),
+        identity=replace(
+            state.identity,
+            model_config=config.model.model_dump(mode="json"),
+        ),
+    )
+    path = tmp_path / "missing-metadata.pt"
+    save_checkpoint(path, state)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload.pop("producer_version")
+    torch.save(payload, path)
+
+    with pytest.raises(CheckpointFormatError, match="producer_version"):
+        load_model_checkpoint(path)
+
+
 def test_corrupt_checkpoint_reports_a_format_error(tmp_path: Path) -> None:
     path = tmp_path / "corrupt.pt"
     path.write_bytes(b"not a checkpoint")
