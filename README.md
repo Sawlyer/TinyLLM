@@ -423,6 +423,44 @@ paths and remain conditional on compatible library version, device, serializatio
 kernels. Export succeeds only after strict reload and deterministic numeric round trip. Existing
 destination is preserved on failure and replaced only with `--overwrite`.
 
+## Functional checks and hardware benchmarks
+
+The normal `uv run pytest` suite checks deterministic behavior and correctness. Benchmark unit tests
+use controlled runtimes; they do not assert wall-clock speed or GPU memory thresholds. Keep noisy
+throughput and latency comparisons out of functional CI.
+
+Run optional CUDA correctness and kernel-compatibility smoke checks on the target device with
+`uv run pytest -m cuda tests/cuda/test_precision_smoke.py`. These check finite forward/backward
+results and skip modes whose hardware or optional kernels are unavailable. They are not performance
+tests.
+
+Run the dedicated precision benchmark manually on the target hardware. It uses the same initialized
+weights, seed, batches, warmup, and measured step count for each mode; CUDA work synchronizes around
+timing. For a first comparison:
+
+```powershell
+uv run tinyllm benchmark-precision --config configs/tinyllm.yaml --modes bf16 fp32 --warmup-steps 5 --measured-steps 20 --output runs/performance/precision-01.json
+```
+
+Repeat with a new output path. Reverse mode order on alternate runs to expose thermal or ordering
+effects:
+
+```powershell
+uv run tinyllm benchmark-precision --config configs/tinyllm.yaml --modes fp32 bf16 --warmup-steps 5 --measured-steps 20 --output runs/performance/precision-02.json
+uv run tinyllm benchmark-precision --config configs/tinyllm.yaml --modes bf16 fp32 --warmup-steps 5 --measured-steps 20 --output runs/performance/precision-03.json
+```
+
+Each JSON file records the model and benchmark settings, seed, operating system, processor, Python,
+PyTorch, CUDA runtime, and GPU name, compute capability, and memory when a CUDA device is selected.
+Keep these reports with the commit and software environment they describe. Results include finite-loss
+status and unsupported/failed reasons; an unavailable kernel is not a zero-speed measurement.
+
+Compare repeated runs on the same machine, then compare relative throughput and peak-memory changes.
+Do not make absolute latency or throughput a CI pass/fail gate: GPU model, driver, thermals, clock
+state, compilation cache, and background load change measurements. Treat a small speed difference
+as inconclusive unless repeated runs support it. Investigate non-finite loss or correctness failures
+separately from performance.
+
 ## Limitations
 
 - single process and single device; no distributed training;
