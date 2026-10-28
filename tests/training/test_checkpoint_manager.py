@@ -132,3 +132,26 @@ def test_retention_requires_run_id_for_metrics_from_multiple_runs(
     with pytest.raises(ValueError, match="multiple runs; specify --run-id"):
         checkpoint_manager.plan_checkpoint_retention(tmp_path, metrics_file=metrics)
 
+
+def test_retention_preserves_checkpoint_with_filename_step_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mismatched = tmp_path / "step-00000010.pt"
+    valid = tmp_path / "step-00000020.pt"
+    mismatched.write_bytes(b"checkpoint")
+    valid.write_bytes(b"checkpoint")
+    metrics = tmp_path / "metrics.jsonl"
+    _write_metrics(metrics, {20: 0.8})
+
+    def inspect(path: Path) -> CheckpointInspection:
+        return _inspection(path, 11 if path == mismatched else 20)
+
+    monkeypatch.setattr(checkpoint_manager, "inspect_checkpoint", inspect)
+    plan = checkpoint_manager.plan_checkpoint_retention(tmp_path, metrics_file=metrics)
+    decisions = {item.path.name: item for item in plan}
+
+    assert decisions[mismatched.name].keep_reasons == (
+        "checkpoint preserved: filename step mismatch",
+    )
+    assert decisions[valid.name].keep is True
+
