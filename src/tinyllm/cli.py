@@ -18,6 +18,7 @@ from tokenizers import Tokenizer
 from tinyllm.config.load import load_config
 from tinyllm.config.schema import GenerationConfig, ModelConfig, TinyLLMConfig
 from tinyllm.data.artifacts import CorpusManifest, load_manifest, sha256_file
+from tinyllm.data.audit import audit_artifacts
 from tinyllm.data.loader import TokenDataset
 from tinyllm.data.prepare import prepare_corpus
 from tinyllm.data.validation import validate_manifest_for_model, validate_tokenizer_for_model
@@ -69,6 +70,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_config_arguments(inspect_data)
     inspect_data.set_defaults(handler=_inspect_data_command)
+
+    audit = commands.add_parser(
+        "audit-artifacts", help="audit corpus artifacts offline without changing them"
+    )
+    audit.add_argument("--manifest", type=Path, required=True)
+    audit.set_defaults(handler=_audit_artifacts_command)
 
     train = commands.add_parser("train", help="train or resume a model")
     _add_config_arguments(train)
@@ -256,6 +263,13 @@ def _inspect_data_command(args: argparse.Namespace) -> None:
             sort_keys=True,
         )
     )
+
+
+def _audit_artifacts_command(args: argparse.Namespace) -> None:
+    report = audit_artifacts(args.manifest)
+    print(json.dumps(report, sort_keys=True))
+    if report["status"] == "error":
+        raise TinyLLMUserError("artifact audit found errors")
 
 
 def _evaluate_command(args: argparse.Namespace) -> None:

@@ -82,7 +82,14 @@ Preparation resolves remote revision, records upstream fingerprint, trains token
 ```powershell
 uv run tinyllm prepare --config configs/tinyllm.yaml
 uv run tinyllm inspect-data --config configs/tinyllm.yaml
+uv run tinyllm audit-artifacts --manifest data/processed/manifest.json
 ```
+
+`audit-artifacts` reads a manifest and its referenced tokenizer and token files without changing
+them. It works offline without loading a model or initializing CUDA, prints a JSON report, and
+returns a failing exit code when it finds invalid metadata, missing or truncated files, checksum
+mismatches, tokenizer identity changes, or token IDs outside the vocabulary. Legacy manifests
+remain untouched and produce a compatibility warning.
 
 Outputs never overwrite by default. Rebuilding intentional dataset requires explicit
 `--overwrite`. For offline smoke run, set `data.dataset_name` to local UTF-8 text file; each
