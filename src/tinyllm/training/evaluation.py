@@ -30,6 +30,7 @@ class EvaluationReport:
     mean_loss: float
     batch_loss_std: float
     perplexity: float
+    perplexity_saturated: bool
     checkpoint_sha256: str
     corpus_sha256: str
 
@@ -139,6 +140,7 @@ def evaluate_model(
         mean_loss=mean_loss,
         batch_loss_std=batch_std,
         perplexity=math.exp(min(mean_loss, 80.0)),
+        perplexity_saturated=mean_loss > 80.0,
         checkpoint_sha256=checkpoint_sha256,
         corpus_sha256=corpus_sha256,
     )
