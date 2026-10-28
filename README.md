@@ -158,6 +158,30 @@ uv run tinyllm interactive --checkpoint checkpoints/resumed.pt --history-file ou
 uv run tinyllm profile-training --config configs/tinyllm.yaml --warmup-steps 2 --steps 3 --trace outputs/profile.json --output outputs/report.json
 ```
 
+### Supervised fine-tuning
+
+Fine-tune a saved model for a narrow task with separate prompt/completion JSONL files. Each
+non-empty line must contain exactly two string fields. TinyLLM does not apply a chat template:
+
+```jsonl
+{"prompt":"Question: What is 2 + 2?\\nAnswer:","completion":" 4"}
+```
+
+Keep training and validation examples in separate files. Prompt tokens provide context; loss
+covers completion tokens and the tokenizer's `<eos>` token. Batches use right padding without
+cross-example packing. The base checkpoint stays intact. The new inference checkpoint receives a
+`.finetune.json` sidecar with dataset and tokenizer hashes, settings, environment, and metrics.
+
+```powershell
+uv run tinyllm finetune --checkpoint checkpoints/latest.pt --train-data data/task-train.jsonl --validation-data data/task-validation.jsonl --output checkpoints/task-tuned.pt --max-steps 200 --device cuda
+uv run tinyllm generate --checkpoint checkpoints/task-tuned.pt --prompt "Question: What is 2 + 2? Answer:"
+```
+
+Fine-tuning updates all model parameters; LoRA and multi-turn templates are not included. It needs
+optimizer memory in addition to model memory. Start with a small model and short run, or use
+`--device cpu` if GPU memory is insufficient. Review validation loss and generated examples;
+these metrics do not establish safety or factuality.
+
 Checkpoint stores model, optimizer, schedule boundary, precision state, Python/PyTorch/CUDA RNG,
 loader RNG, full configuration snapshot, and model/tokenizer/corpus identities. Resume rejects
 incompatible configuration or artifacts before mutation. Generation can recover configuration
@@ -482,4 +506,3 @@ separately from performance.
 - dataset sampling context: [The 1 Billion Token Challenge](https://huggingface.co/blog/codelion/optimal-dataset-mixing/)
 - PyTorch, Hugging Face Datasets, Tokenizers, TensorBoard, Pydantic, PyYAML, and optional
   TorchAO power runtime and tooling.
-
