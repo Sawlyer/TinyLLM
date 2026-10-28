@@ -26,6 +26,7 @@ from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_check
 from tinyllm.model.transformer import TinyLLM, count_parameters
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
 from tinyllm.training.checkpoint import load_model_checkpoint
+from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
 from tinyllm.training.trainer import Trainer
 
@@ -175,6 +176,11 @@ def _train_command(args: argparse.Namespace) -> None:
     status = "failed"
     try:
         trainer, _ = _build_cli_trainer(config)
+        if isinstance(trainer, Trainer) and trainer.metric_logger is None:
+            trainer.metric_logger = MetricLogger(
+                config.logging.run_dir,
+                run_id=str(manifest["run_id"]),
+            )
         if args.resume is not None:
             trainer.load_checkpoint(args.resume)
         summary = trainer.train(max_steps=args.max_steps, overwrite_checkpoints=args.overwrite)
@@ -620,4 +626,3 @@ def _local_documents(dataset_name: str) -> Iterable[str] | None:
 def _require_writable_output(path: Path, *, overwrite: bool, label: str) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
-
