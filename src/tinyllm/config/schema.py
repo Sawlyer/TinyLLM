@@ -63,6 +63,7 @@ class TrainingConfig(StrictConfig):
     weight_decay: float = Field(ge=0)
     max_grad_norm: float = Field(gt=0)
     compile: bool = False
+    isolate_documents: bool = False
     checkpoint_dir: Path
 
     @model_validator(mode="after")
