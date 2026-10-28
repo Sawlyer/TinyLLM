@@ -312,6 +312,7 @@ def _evaluate_command(args: argparse.Namespace) -> None:
                 "evaluated_tokens": report.evaluated_tokens,
                 "mean_loss": report.mean_loss,
                 "perplexity": report.perplexity,
+                "perplexity_saturated": report.perplexity_saturated,
                 "seed": report.seed,
                 "split": report.split,
                 "validation_loss": report.mean_loss if report.split == "validation" else None,
