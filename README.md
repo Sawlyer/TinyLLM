@@ -414,6 +414,33 @@ JSON; an existing output file requires `--overwrite`.
 uv run tinyllm benchmark-inference --checkpoint checkpoints/latest.pt --prompt "Once upon a time" --max-new-tokens 64 --warmup-runs 2 --measured-runs 5 --output runs/inference-benchmark.json
 ```
 
+### KV cache memory estimate
+
+Use `estimate-kv-cache` before a generation run to calculate the preallocated key/value cache:
+
+```powershell
+uv run tinyllm estimate-kv-cache --config configs/tinyllm.yaml --batch-size 1 --dtype float32
+```
+
+The estimate reports bytes per layer and total bytes. It uses
+`2 × layers × batch × KV heads × head dimension × context length × bytes per element`.
+By default, context length comes from `model.max_seq_len`; `--context-length` supports a
+planning scenario. For a run, use the checkpoint's actual context length. This estimate covers
+key/value tensors only, not model weights, activations, CUDA workspaces, or allocator overhead.
+CUDA generation checks available device memory before allocating the cache and gives a direct
+error when the estimate does not fit. `--no-cache` avoids the cache at lower generation speed.
+
+To compare context-window quality, use checkpoints trained with different context lengths and
+evaluate each on the same validation split, token budget, and seed:
+
+```powershell
+uv run tinyllm evaluate --config configs/context-512.yaml --checkpoint checkpoints/context-512.pt --tokens 8192 --seed 42 --output runs/context-512.json
+uv run tinyllm evaluate --config configs/context-1024.yaml --checkpoint checkpoints/context-1024.pt --tokens 8192 --seed 42 --output runs/context-1024.json
+```
+
+Compare validation loss alongside cache size. Equal token budgets make the evaluation cost
+comparable; they do not guarantee identical examples when model context windows differ.
+
 ## BF16/FP8 benchmark
 
 Benchmark modes receive same initialized weights, seed, batch shapes, and pre-generated token
