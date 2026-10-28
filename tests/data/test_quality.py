@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import json
+from pathlib import Path
 
+import pytest
+
+from tinyllm.cli import _build_parser
+from tinyllm.config.load import load_config
+from tinyllm.config.schema import TinyLLMConfig
 from tinyllm.data.prepare import _spool_documents
+from tinyllm.data.prepare import prepare_corpus
 from tinyllm.data.quality import CorpusQualityOptions, StreamingCorpusQuality
 
 
@@ -86,6 +94,24 @@ def test_quality_detects_expected_language_and_repeated_runs(tmp_path):
     assert reasons["repeated_character_run"] == 1
 
 
+def test_quality_can_filter_repeated_word_sequences(tmp_path):
+    quality = StreamingCorpusQuality(
+        tmp_path / "quality.sqlite",
+        CorpusQualityOptions(max_repeated_ngram_ratio=0.25),
+    )
+    try:
+        retained = quality.record(
+            "the quiet fox runs across fields each morning " * 3,
+            "train",
+        )
+        report = quality.report()
+    finally:
+        quality.close()
+
+    assert not retained
+    assert report["splits"]["train"]["filtered_reasons"] == {"repeated_word_sequences": 1}
+
+
 def test_spooling_filters_after_deterministic_split_and_reports_counts(tmp_path):
     config = SimpleNamespace(
         data=SimpleNamespace(text_field="text", seed=42, validation_fraction=0.5)
@@ -114,4 +140,56 @@ def test_spooling_filters_after_deterministic_split_and_reports_counts(tmp_path)
     assert report["blank_documents"] == 1
     assert report["invalid_records"] == 1
     assert sum(item["documents_filtered"] for item in report["splits"].values()) == 1
+
+
+def test_prepare_publishes_report_and_rejects_changed_cached_filters(tmp_path):
+    root = Path(__file__).parents[2]
+    raw = load_config(root / "configs" / "tinyllm.yaml", []).model_dump(mode="python")
+    raw["data"].update(
+        {
+            "cache_dir": tmp_path / "cache",
+            "output_dir": tmp_path / "processed",
+            "validation_fraction": 0.5,
+        }
+    )
+    raw["tokenizer"].update(
+        {"vocab_size": 128, "min_frequency": 1, "path": tmp_path / "tokenizer.json"}
+    )
+    raw["model"]["vocab_size"] = 128
+    config = TinyLLMConfig.model_validate(raw)
+    documents = [
+        {"id": f"doc-{index}", "text": f"sample document number {index}"}
+        for index in range(24)
+    ] + [{"id": "short", "text": "tiny"}]
+    options = CorpusQualityOptions(min_characters=12)
+
+    manifest = prepare_corpus(config, documents=documents, quality_options=options)
+    report_path = config.data.output_dir / "quality-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert sum(manifest.document_counts.values()) == 24
+    assert report["filters"] == options.to_dict()
+    assert report["source_records"] == 25
+    assert sum(split["documents_before"] for split in report["splits"].values()) == 25
+    assert sum(split["documents_after"] for split in report["splits"].values()) == 24
+    assert prepare_corpus(config, documents=iter(()), quality_options=options) == manifest
+    with pytest.raises(FileExistsError, match="different quality filters"):
+        prepare_corpus(config, documents=iter(()))
+
+
+def test_prepare_cli_exposes_opt_in_quality_filters():
+    args = _build_parser().parse_args(
+        [
+            "prepare",
+            "--min-document-characters",
+            "100",
+            "--deduplicate-exact",
+            "--expected-language",
+            "en",
+        ]
+    )
+
+    assert args.min_document_characters == 100
+    assert args.deduplicate_exact
+    assert args.expected_language == "en"
 
