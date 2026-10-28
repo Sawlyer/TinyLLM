@@ -125,7 +125,7 @@ class Trainer:
         last_validation_step: int | None = None
         self._interrupt_requested = False
         try:
-            with self._sigint_checkpoint_request():
+            with self._interrupt_checkpoint_request():
                 initial_loss = self._monitor_loss(self.train_dataset)
                 self._require_finite_scalar(initial_loss, "loss before training")
                 self._raise_after_interrupt_checkpoint()
@@ -492,20 +492,27 @@ class Trainer:
         self._tokens_processed = state["tokens_processed"]
 
     @contextmanager
-    def _sigint_checkpoint_request(self) -> Iterator[None]:
+    def _interrupt_checkpoint_request(self) -> Iterator[None]:
         if threading.current_thread() is not threading.main_thread():
             yield
             return
-        previous_handler = signal.getsignal(signal.SIGINT)
+        handled_signals = (signal.SIGINT, signal.SIGTERM)
+        previous_handlers = {
+            signal_number: signal.getsignal(signal_number) for signal_number in handled_signals
+        }
 
         def request_checkpoint(_signum: int, _frame: Any) -> None:
             self._interrupt_requested = True
 
-        signal.signal(signal.SIGINT, request_checkpoint)
+        installed_signals: list[int] = []
         try:
+            for signal_number in handled_signals:
+                signal.signal(signal_number, request_checkpoint)
+                installed_signals.append(signal_number)
             yield
         finally:
-            signal.signal(signal.SIGINT, previous_handler)
+            for signal_number in reversed(installed_signals):
+                signal.signal(signal_number, previous_handlers[signal_number])
 
     def _raise_after_interrupt_checkpoint(self) -> None:
         if not self._interrupt_requested:
