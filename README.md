@@ -168,7 +168,8 @@ uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/r
 Reports include checkpoint and selected corpus SHA-256, split, seed, requested and actual token
 counts, batch count, mean next-token loss, population standard deviation across batch mean losses,
 and perplexity. Loss and its dispersion use nats per predicted token; perplexity is the exponential
-of token-weighted mean loss and has no unit. JSON and CSV output refuse to replace an existing file
+of token-weighted mean loss and has no unit. For numeric safety, values above `exp(80)` are capped;
+`perplexity_saturated` marks this case. JSON and CSV output refuse to replace an existing file
 unless `--overwrite` is passed. Human-readable lines go to stderr; stdout remains one JSON object
 for scripts. The JSON keeps the existing `validation_loss` and `validation_perplexity` fields.
 
