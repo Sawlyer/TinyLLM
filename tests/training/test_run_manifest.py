@@ -425,3 +425,31 @@ def test_resume_does_not_reuse_running_manifest_for_unmatched_checkpoint(tmp_pat
 
     assert resumed["run_id"] != initial["run_id"]
 
+
+def test_resume_does_not_match_non_checkpoint_artifact_digest(tmp_path):
+    config = _config()
+    run_dir = tmp_path / "runs"
+    config = config.model_copy(
+        update={"logging": config.logging.model_copy(update={"run_dir": run_dir})}
+    )
+    manifest_path, initial = run_manifest.start_run_manifest(
+        config,
+        argparse.Namespace(command="train", resume=None),
+        started_at="2026-10-28T12:00:00Z",
+    )
+    checkpoint = tmp_path / "stale.pt"
+    checkpoint.write_bytes(b"same bytes as a non-checkpoint artifact")
+    initial["status"] = "completed"
+    initial["artifacts"] = {
+        "data.train_tokens": run_manifest._file_sha256(checkpoint)
+    }
+    run_manifest.write_run_manifest(manifest_path, initial)
+
+    _, resumed = run_manifest.start_run_manifest(
+        config,
+        argparse.Namespace(command="train", resume=checkpoint),
+        started_at="2026-10-28T12:05:00Z",
+    )
+
+    assert resumed["run_id"] != initial["run_id"]
+
