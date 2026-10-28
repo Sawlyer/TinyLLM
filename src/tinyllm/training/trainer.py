@@ -116,10 +116,13 @@ class Trainer:
         logger = self.metric_logger or MetricLogger(self.config.logging.run_dir)
         wall_start = self._clock()
         interval_training_seconds = 0.0
+        interval_data_loading_seconds = 0.0
+        interval_evaluation_seconds = 0.0
         training_segment_start: float | None = None
         interval_tokens = 0
         tokens_processed = self._tokens_processed
         last_validation_loss: float | None = None
+        last_validation_step: int | None = None
         self._interrupt_requested = False
         try:
             with self._sigint_checkpoint_request():
@@ -138,7 +141,9 @@ class Trainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     accumulated_loss: Tensor | None = None
                     for _ in range(self.config.training.gradient_accumulation_steps):
+                        data_loading_started = self._clock()
                         inputs, targets = self._sample_training_batch()
+                        interval_data_loading_seconds += self._clock() - data_loading_started
                         with self.precision.autocast():
                             output = self._training_model(inputs, targets)
                             loss = output.loss
@@ -198,7 +203,12 @@ class Trainer:
                         interval_training_seconds += training_segment_end - training_segment_start
                         training_segment_start = None
                     if should_validate:
+                        self._synchronize_for_metrics()
+                        evaluation_started = self._clock()
                         last_validation_loss = self._validation_loss(self.validation_dataset)
+                        self._synchronize_for_metrics()
+                        interval_evaluation_seconds += self._clock() - evaluation_started
+                        last_validation_step = step
                         self._raise_after_interrupt_checkpoint()
 
                     if should_log:
@@ -211,6 +221,11 @@ class Trainer:
                             "perplexity": _safe_perplexity(mean_loss),
                             "tokens_per_second": interval_tokens
                             / max(interval_training_seconds, 1e-12),
+                            "sequences_per_second": interval_tokens
+                            / self.train_dataset.sequence_length
+                            / max(interval_training_seconds, 1e-12),
+                            "data_loading_seconds": interval_data_loading_seconds,
+                            "evaluation_seconds": interval_evaluation_seconds,
                             "elapsed_seconds": metric_time - wall_start,
                             "peak_vram_bytes": self._peak_vram_bytes(),
                             "gradient_norm": float(gradient_norm),
@@ -220,10 +235,14 @@ class Trainer:
                             metrics["validation_perplexity"] = _safe_perplexity(
                                 last_validation_loss
                             )
+                            metrics["validation_step"] = last_validation_step or 0
+                        metrics.update(self._cuda_memory_metrics())
                         logger.log(step, metrics)
                         self._raise_after_interrupt_checkpoint()
                         interval_tokens = 0
                         interval_training_seconds = 0.0
+                        interval_data_loading_seconds = 0.0
+                        interval_evaluation_seconds = 0.0
 
                     if step % self.config.logging.checkpoint_interval == 0:
                         checkpoint_path = self.config.training.checkpoint_dir / (
@@ -579,6 +598,15 @@ class Trainer:
         if self.device.type != "cuda":
             return 0
         return torch.cuda.max_memory_allocated(self.device)
+
+    def _cuda_memory_metrics(self) -> dict[str, int]:
+        if self.device.type != "cuda":
+            return {}
+        free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+        return {
+            "cuda_free_memory_bytes": int(free_bytes),
+            "cuda_total_memory_bytes": int(total_bytes),
+        }
 
 
 def _resolve_device(name: str) -> torch.device:
