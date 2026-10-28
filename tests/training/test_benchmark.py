@@ -212,6 +212,7 @@ def test_benchmark_reuses_identical_batches_and_emits_machine_readable_results(
     assert payload["environment"]["platform"]
     assert payload["environment"]["torch_version"] == str(torch.__version__)
     assert "cuda_runtime_version" in payload["environment"]
+    assert "torchao_version" in payload["environment"]
     assert payload["results"] == [result.to_dict() for result in results]
 
 
