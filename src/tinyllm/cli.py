@@ -612,7 +612,12 @@ def _build_training_preflight_report(
             "resume checkpoint does not exist",
             "Provide an existing compatible checkpoint or omit --resume.",
         )
-    elif args.resume is not None and train_dataset is not None and manifest is not None:
+    elif (
+        args.resume is not None
+        and train_dataset is not None
+        and manifest is not None
+        and not errors
+    ):
         try:
             train_artifact = manifest.artifacts["train"]
             expected_identity = ArtifactIdentity(
