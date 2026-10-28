@@ -24,6 +24,7 @@ from tinyllm.data.artifacts import (
     write_token_chunks,
 )
 from tinyllm.data.clean import normalize_document
+from tinyllm.data.quality import CorpusQualityOptions, StreamingCorpusQuality
 from tinyllm.data.split import split_for_id
 from tinyllm.data.tokenizer import train_tokenizer
 
@@ -34,11 +35,14 @@ def prepare_corpus(
     config: TinyLLMConfig,
     overwrite: bool = False,
     documents: Iterable[Mapping[str, Any] | str] | None = None,
+    quality_options: CorpusQualityOptions | None = None,
 ) -> CorpusManifest:
     """Prepare a checksummed corpus from injected or streaming source documents."""
     output_dir = config.data.output_dir.resolve()
     tokenizer_path = config.tokenizer.path.resolve()
     manifest_path = output_dir / "manifest.json"
+    quality_report_path = output_dir / "quality-report.json"
+    effective_quality_options = quality_options or CorpusQualityOptions()
     final_paths = [
         output_dir / "train.bin",
         output_dir / "validation.bin",
@@ -65,6 +69,20 @@ def prepare_corpus(
                 "corpus outputs incompatible with config; "
                 f"pass overwrite=True: {incompatibility}"
             )
+        if quality_report_path.exists():
+            existing_report = json.loads(quality_report_path.read_text(encoding="utf-8"))
+            if not isinstance(existing_report, dict):
+                raise FileExistsError(
+                    "prepared corpus quality report is invalid; pass overwrite=True"
+                )
+            if existing_report.get("filters") != effective_quality_options.to_dict():
+                raise FileExistsError(
+                    "prepared corpus uses different quality filters; pass overwrite=True"
+                )
+        elif quality_options is not None and quality_options != CorpusQualityOptions():
+            raise FileExistsError(
+                "prepared corpus has no quality report; pass overwrite=True to apply filters"
+            )
         return manifest
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +100,9 @@ def prepare_corpus(
             source = documents
             resolved_revision = None
             upstream_fingerprint = None
-        document_counts, content_fingerprint = _spool_documents(source, config, staging_dir)
+        document_counts, content_fingerprint, quality_report = _spool_documents(
+            source, config, staging_dir, effective_quality_options
+        )
         if document_counts["train"] == 0:
             raise ValueError("training split contains no usable documents")
 
@@ -137,11 +157,17 @@ def prepare_corpus(
         )
         staged_manifest = staging_dir / "manifest.json"
         write_manifest(staged_manifest, manifest)
+        staged_quality_report = staging_dir / "quality-report.json"
+        staged_quality_report.write_text(
+            json.dumps(quality_report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         promotions = [
             (staging_dir / "train.bin", output_dir / "train.bin"),
             (staging_dir / "validation.bin", output_dir / "validation.bin"),
             (staged_tokenizer, tokenizer_path),
             (staged_manifest, manifest_path),
+            (staged_quality_report, quality_report_path),
         ]
         _promote_transaction(promotions, transaction_id)
         return load_manifest(manifest_path)
@@ -202,9 +228,13 @@ def _spool_documents(
     documents: Iterable[Mapping[str, Any] | str],
     config: TinyLLMConfig,
     staging_dir: Path,
-) -> tuple[dict[str, int], str]:
+    quality_options: CorpusQualityOptions | None = None,
+) -> tuple[dict[str, int], str, dict[str, Any]]:
     counts = {split: 0 for split in SPLITS}
     source_digest = hashlib.sha256()
+    quality = StreamingCorpusQuality(
+        staging_dir / "quality.sqlite", quality_options or CorpusQualityOptions()
+    )
     files = {
         split: (staging_dir / f"{split}.documents.jsonl").open(
             "w", encoding="utf-8", newline="\n"
@@ -213,6 +243,9 @@ def _spool_documents(
     }
     try:
         for row in documents:
+            if not isinstance(row, (str, Mapping)):
+                quality.record_invalid()
+                continue
             if isinstance(row, str):
                 text = row
                 explicit_id = None
@@ -223,18 +256,22 @@ def _spool_documents(
                 continue
             normalized = normalize_document(text)  # type: ignore[arg-type]
             if normalized is None:
+                quality.record_invalid(blank=True)
                 continue
             document_id = (
                 str(explicit_id)
                 if explicit_id is not None
                 else hashlib.sha256(normalized.encode("utf-8")).hexdigest()
             )
-            _update_source_digest(source_digest, document_id, normalized)
             split = split_for_id(
                 document_id,
                 seed=config.data.seed,
                 validation_fraction=config.data.validation_fraction,
             )
+            if not quality.record(normalized, split):
+                _update_source_digest(source_digest, document_id, normalized)
+                continue
+            _update_source_digest(source_digest, document_id, normalized)
             json.dump(normalized, files[split], ensure_ascii=False)
             files[split].write("\n")
             counts[split] += 1
@@ -244,7 +281,9 @@ def _spool_documents(
     finally:
         for spool_file in files.values():
             spool_file.close()
-    return counts, source_digest.hexdigest()
+        quality_report = quality.report()
+        quality.close()
+    return counts, source_digest.hexdigest(), quality_report
 
 
 def _read_spool(path: Path) -> Iterator[str]:

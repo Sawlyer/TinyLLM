@@ -28,6 +28,7 @@ from tinyllm.data.audit import audit_artifacts
 from tinyllm.data.diagnostics import diagnose_tokenizer
 from tinyllm.data.loader import TokenDataset
 from tinyllm.data.prepare import prepare_corpus
+from tinyllm.data.quality import CorpusQualityOptions
 from tinyllm.data.validation import validate_manifest_for_model, validate_tokenizer_for_model
 from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
 from tinyllm.inference.generate import generate
@@ -84,6 +85,15 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare = commands.add_parser("prepare", help="prepare tokenizer and corpus artifacts")
     _add_config_arguments(prepare)
     prepare.add_argument("--overwrite", action="store_true")
+    prepare.add_argument("--min-document-characters", type=int)
+    prepare.add_argument("--max-document-characters", type=int)
+    prepare.add_argument("--max-repeated-character-ratio", type=float)
+    prepare.add_argument("--max-repeated-ngram-ratio", type=float)
+    prepare.add_argument("--expected-language", choices=("de", "en", "es", "fr"))
+    prepare.add_argument("--minimum-language-confidence", type=float, default=0.65)
+    prepare.add_argument("--deduplicate-exact", action="store_true")
+    prepare.add_argument("--deduplicate-near", action="store_true")
+    prepare.add_argument("--near-duplicate-hamming-distance", type=int, default=3)
     prepare.set_defaults(handler=_prepare_command)
 
     inspect_data = commands.add_parser(
@@ -383,11 +393,33 @@ def _add_config_arguments(
 def _prepare_command(args: argparse.Namespace) -> None:
     config = _load_args_config(args)
     documents = _local_documents(config.data.dataset_name)
-    manifest = prepare_corpus(config, overwrite=args.overwrite, documents=documents)
+    quality_options = CorpusQualityOptions(
+        min_characters=args.min_document_characters,
+        max_characters=args.max_document_characters,
+        max_repeated_character_ratio=args.max_repeated_character_ratio,
+        max_repeated_ngram_ratio=args.max_repeated_ngram_ratio,
+        expected_language=args.expected_language,
+        minimum_language_confidence=args.minimum_language_confidence,
+        deduplicate_exact=args.deduplicate_exact,
+        deduplicate_near=args.deduplicate_near,
+        near_duplicate_hamming_distance=args.near_duplicate_hamming_distance,
+    )
+    default_quality_options = CorpusQualityOptions()
+    manifest = prepare_corpus(
+        config,
+        overwrite=args.overwrite,
+        documents=documents,
+        quality_options=(None if quality_options == default_quality_options else quality_options),
+    )
     print(
         json.dumps(
             {
                 "manifest": str(_manifest_path(config)),
+                "quality_report": (
+                    str(config.data.output_dir / "quality-report.json")
+                    if (config.data.output_dir / "quality-report.json").is_file()
+                    else None
+                ),
                 "dataset": manifest.dataset_name,
                 "dataset_revision": manifest.dataset_revision,
                 "dataset_fingerprint": manifest.dataset_fingerprint,
