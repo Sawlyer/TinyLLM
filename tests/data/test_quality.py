@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -67,8 +67,6 @@ def test_quality_near_deduplication_is_optional_and_hash_only(tmp_path):
 
 
 def test_quality_options_reject_invalid_bounds():
-    import pytest
-
     with pytest.raises(ValueError, match="cannot exceed"):
         CorpusQualityOptions(min_characters=20, max_characters=10)
 
