@@ -6,7 +6,9 @@ import argparse
 import json
 import math
 import random
+import signal
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -24,6 +26,7 @@ from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_check
 from tinyllm.model.transformer import TinyLLM, count_parameters
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
 from tinyllm.training.checkpoint import load_model_checkpoint
+from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
 from tinyllm.training.trainer import Trainer
 
 DEFAULT_CONFIG = Path("configs/tinyllm.yaml")
@@ -165,25 +168,55 @@ def _train_command(args: argparse.Namespace) -> None:
         return
     checkpoint = args.checkpoint or config.training.checkpoint_dir / "latest.pt"
     _require_writable_output(checkpoint, overwrite=args.overwrite, label="checkpoint")
-    trainer, _ = _build_cli_trainer(config)
-    if args.resume is not None:
-        trainer.load_checkpoint(args.resume)
-    summary = trainer.train(max_steps=args.max_steps, overwrite_checkpoints=args.overwrite)
-    trainer.save_checkpoint(checkpoint)
-    print(
-        json.dumps(
-            {
-                "checkpoint": str(checkpoint),
-                "steps": summary.steps,
-                "initial_loss": summary.initial_loss,
-                "final_loss": summary.final_loss,
-                "validation_loss": summary.validation_loss,
-                "tokens_processed": summary.tokens_processed,
-                "elapsed_seconds": summary.elapsed_seconds,
-            },
-            sort_keys=True,
-        )
+    manifest_path, manifest = start_run_manifest(
+        config, args, started_at=_utc_timestamp()
     )
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
+    status = "failed"
+    try:
+        trainer, _ = _build_cli_trainer(config)
+        if args.resume is not None:
+            trainer.load_checkpoint(args.resume)
+        summary = trainer.train(max_steps=args.max_steps, overwrite_checkpoints=args.overwrite)
+        trainer.save_checkpoint(checkpoint)
+        status = "completed"
+        print(
+            json.dumps(
+                {
+                    "checkpoint": str(checkpoint),
+                    "steps": summary.steps,
+                    "initial_loss": summary.initial_loss,
+                    "final_loss": summary.final_loss,
+                    "validation_loss": summary.validation_loss,
+                    "tokens_processed": summary.tokens_processed,
+                    "elapsed_seconds": summary.elapsed_seconds,
+                },
+                sort_keys=True,
+            )
+        )
+    except KeyboardInterrupt:
+        status = "interrupted"
+        raise
+    finally:
+        try:
+            finish_run_manifest(
+                manifest_path,
+                manifest,
+                config,
+                args,
+                status=status,
+                finished_at=_utc_timestamp(),
+            )
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _handle_sigterm(signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt(f"received signal {signum}")
 
 
 def _inspect_data_command(args: argparse.Namespace) -> None:
@@ -587,3 +620,4 @@ def _local_documents(dataset_name: str) -> Iterable[str] | None:
 def _require_writable_output(path: Path, *, overwrite: bool, label: str) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
+
