@@ -81,6 +81,7 @@ Preparation resolves remote revision, records upstream fingerprint, trains token
 
 ```powershell
 uv run tinyllm prepare --config configs/tinyllm.yaml
+uv run tinyllm prepare --config configs/tinyllm.yaml --min-document-characters 80 --deduplicate-exact --deduplicate-near --expected-language en
 uv run tinyllm inspect-data --config configs/tinyllm.yaml
 uv run tinyllm audit-artifacts --manifest data/processed/manifest.json
 uv run tinyllm diagnose-tokenizer --manifest data/processed/manifest.json --splits train validation --sample-documents 1000 --compare-vocab-sizes 8192 16384 --output outputs/tokenizer-diagnostics.json
@@ -98,6 +99,15 @@ Optional vocabulary comparisons retrain BPE configurations on the same decoded s
 train artifact; results describe that bounded sample, not the original unprocessed source.
 The command never rewrites corpus artifacts. Its JSON report prints to stdout unless `--output`
 is set; existing reports require `--overwrite`.
+
+`prepare` writes `data/processed/quality-report.json` alongside the manifest. It counts document
+lengths, language guesses, exact duplicates, and near duplicates per train/validation split while
+streaming. Filters stay disabled by default. Opt-in flags can remove short/long documents, repeated
+character runs, unexpected languages, exact duplicates, or approximate near duplicates. The
+language detector is a lightweight marker heuristic, and near duplicates use bounded disk-backed
+SimHash candidates; review the report before adopting aggressive thresholds. Filtering happens
+after deterministic split assignment, so it never moves documents between splits. Changing quality
+filters for already prepared artifacts requires `--overwrite`.
 
 Outputs never overwrite by default. Rebuilding intentional dataset requires explicit
 `--overwrite`. For offline smoke run, set `data.dataset_name` to local UTF-8 text file; each
