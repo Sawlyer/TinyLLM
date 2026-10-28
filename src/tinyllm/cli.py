@@ -88,6 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--min-document-characters", type=int)
     prepare.add_argument("--max-document-characters", type=int)
     prepare.add_argument("--max-repeated-character-ratio", type=float)
+    prepare.add_argument("--max-repeated-ngram-ratio", type=float)
     prepare.add_argument("--expected-language", choices=("de", "en", "es", "fr"))
     prepare.add_argument("--minimum-language-confidence", type=float, default=0.65)
     prepare.add_argument("--deduplicate-exact", action="store_true")
@@ -396,6 +397,7 @@ def _prepare_command(args: argparse.Namespace) -> None:
         min_characters=args.min_document_characters,
         max_characters=args.max_document_characters,
         max_repeated_character_ratio=args.max_repeated_character_ratio,
+        max_repeated_ngram_ratio=args.max_repeated_ngram_ratio,
         expected_language=args.expected_language,
         minimum_language_confidence=args.minimum_language_confidence,
         deduplicate_exact=args.deduplicate_exact,
