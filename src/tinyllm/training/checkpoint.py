@@ -104,6 +104,21 @@ class LoadedModelCheckpoint:
     tokens_processed: int
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointInspection:
+    """Validated checkpoint metadata without constructing a model."""
+
+    path: Path
+    size_bytes: int
+    step: int
+    tokens_processed: int
+    status: str
+    reason: str | None
+    model_config: Mapping[str, Any]
+    tokenizer_sha256: str
+    corpus_sha256: str
+
+
 def save_checkpoint(path: Path, state: TrainingState) -> None:
     """Durably replace ``path`` with one complete checkpoint."""
     if not isinstance(state, TrainingState):
@@ -133,6 +148,33 @@ def load_checkpoint(path: Path, expected: ArtifactIdentity) -> TrainingState:
         )
     _require_compatible_identity(state.identity, expected)
     return state
+
+
+def inspect_checkpoint(path: Path) -> CheckpointInspection:
+    """Validate checkpoint structure and return metadata without model allocation."""
+    checkpoint_path = Path(path)
+    payload = _load_payload(checkpoint_path)
+    try:
+        state = _payload_to_state(payload)
+    except (TypeError, ValueError) as error:
+        raise CheckpointFormatError(f"invalid checkpoint fields: {checkpoint_path}") from error
+    try:
+        size_bytes = checkpoint_path.stat().st_size
+    except OSError as error:
+        raise CheckpointFormatError(
+            f"checkpoint disappeared during inspection: {checkpoint_path}"
+        ) from error
+    return CheckpointInspection(
+        path=checkpoint_path,
+        size_bytes=size_bytes,
+        step=state.step,
+        tokens_processed=state.tokens_processed,
+        status=state.status,
+        reason=state.reason,
+        model_config=dict(state.identity.model_config),
+        tokenizer_sha256=state.identity.tokenizer_sha256,
+        corpus_sha256=state.identity.corpus_sha256,
+    )
 
 
 def load_model_checkpoint(
@@ -318,3 +360,4 @@ def _require_compatible_identity(actual: ArtifactIdentity, expected: ArtifactIde
         raise ValueError("checkpoint tokenizer identity is incompatible")
     if actual.corpus_sha256 != expected.corpus_sha256:
         raise ValueError("checkpoint corpus identity is incompatible")
+
