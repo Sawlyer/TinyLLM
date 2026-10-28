@@ -33,8 +33,6 @@ flowchart LR
   BF16, FP16, INT8, or INT4 inference exports;
 - CPU test suite plus separately marked CUDA smoke tests.
 
-Architecture details live in [docs/architecture.md](docs/architecture.md). RTX 5080 setup and
-benchmark procedure live in [docs/training-rtx-5080.md](docs/training-rtx-5080.md).
 
 ## Windows quick start with uv
 
@@ -430,16 +428,10 @@ key/value tensors only, not model weights, activations, CUDA workspaces, or allo
 CUDA generation checks available device memory before allocating the cache and gives a direct
 error when the estimate does not fit. `--no-cache` avoids the cache at lower generation speed.
 
-To compare context-window quality, use checkpoints trained with different context lengths and
-evaluate each on the same validation split, token budget, and seed:
-
-```powershell
-uv run tinyllm evaluate --config configs/context-512.yaml --checkpoint checkpoints/context-512.pt --tokens 8192 --seed 42 --output runs/context-512.json
-uv run tinyllm evaluate --config configs/context-1024.yaml --checkpoint checkpoints/context-1024.pt --tokens 8192 --seed 42 --output runs/context-1024.json
-```
-
-Compare validation loss alongside cache size. Equal token budgets make the evaluation cost
-comparable; they do not guarantee identical examples when model context windows differ.
+To compare checkpoints trained with different context lengths, evaluate each with its matching
+configuration on the same validation split and use the same `--tokens` and `--seed`. Compare
+validation loss alongside cache size. Equal token budgets make evaluation cost comparable; they
+do not guarantee identical examples when context windows differ.
 
 ## BF16/FP8 benchmark
 
@@ -453,13 +445,6 @@ uv run tinyllm benchmark-precision --config configs/tinyllm.yaml --modes bf16 fp
 
 Existing output is refused unless `--overwrite` is explicit. Compare local results only after
 confirming same software, configuration, thermals, and background load.
-
-Sample reporting table, intentionally unpopulated until local hardware run:
-
-| Mode | Tokens/s | Peak allocated | Peak reserved | Mean loss | Finite |
-| --- | ---: | ---: | ---: | ---: | --- |
-| BF16 | — | — | — | — | — |
-| FP8 | — | — | — | — | — |
 
 ## BF16, FP16, INT8, and INT4 export
 
@@ -532,7 +517,10 @@ config and reference checkpoint.
 
 ```powershell
 uv sync --extra external
-uv run tinyllm compare-local-llama --config configs/llama-local.yaml --checkpoint checkpoints/reference.pt --model-dir models/local-llama --tokens 4096 --seed 42 --output runs/llama-comparison.json
+$env:TINYLLM_CONFIG = Read-Host "Path to a config matching both checkpoints"
+$referenceCheckpoint = Read-Host "Path to the TinyLLM reference checkpoint"
+$localLlamaDirectory = Read-Host "Path to the local Llama directory"
+uv run tinyllm compare-local-llama --config $env:TINYLLM_CONFIG --checkpoint $referenceCheckpoint --model-dir $localLlamaDirectory --tokens 4096 --seed 42 --output runs/llama-comparison.json
 ```
 
 This adapter supports standard RoPE, SiLU SwiGLU, RMSNorm, grouped-query attention, and tied or
