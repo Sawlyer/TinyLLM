@@ -626,7 +626,13 @@ def _build_training_preflight_report(
                 corpus_sha256=train_artifact.sha256,
             )
             state = load_training_checkpoint(Path(args.resume), expected_identity)
-            _validate_resume_preflight(config, train_dataset, state, max_steps=steps)
+            _validate_resume_preflight(
+                config,
+                train_dataset,
+                state,
+                max_steps=steps,
+                device=device,
+            )
         except (OSError, ValueError, TypeError, TinyLLMUserError) as error:
             issue(
                 errors,
@@ -759,6 +765,7 @@ def _validate_resume_preflight(
     state: TrainingState,
     *,
     max_steps: int,
+    device: torch.device,
 ) -> None:
     snapshot = state.config_snapshot
     model_snapshot = snapshot.get("model")
@@ -836,6 +843,27 @@ def _validate_resume_preflight(
             or cuda_state.numel() == 0
         ):
             raise ValueError("checkpoint CUDA RNG state is invalid")
+    cuda_available = torch.cuda.is_available()
+    device_count = torch.cuda.device_count() if cuda_available else 0
+    active_device = torch.cuda.current_device() if cuda_available else None
+    training_device_index = device.index
+    if device.type == "cuda" and training_device_index is None:
+        training_device_index = active_device
+    current_cuda_metadata = {
+        "available": cuda_available,
+        "device_count": device_count,
+        "active_device": active_device,
+        "training_device_type": device.type,
+        "training_device_index": training_device_index,
+    }
+    for field, current_value in current_cuda_metadata.items():
+        if metadata[field] != current_value:
+            raise ValueError(f"checkpoint CUDA/device metadata {field} is incompatible")
+    for device_index, cuda_state in enumerate(state.cuda_rng_states):
+        try:
+            torch.Generator(device=f"cuda:{device_index}").set_state(cuda_state)
+        except RuntimeError as error:
+            raise ValueError("checkpoint CUDA RNG state is invalid") from error
 
 
 def _safe_perplexity(loss: float) -> float:
