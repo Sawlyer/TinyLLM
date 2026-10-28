@@ -52,9 +52,18 @@ def write_quantization_comparison_report(
     *,
     overwrite: bool = False,
 ) -> None:
+    write_json_report(report.to_dict(), output_path, overwrite=overwrite)
+
+
+def write_json_report(
+    payload: Mapping[str, object],
+    output_path: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".json":
-        raise ValueError("quantization comparison output must use a .json extension")
+        raise ValueError("report output must use a .json extension")
     if output_path.exists() and not overwrite:
         raise FileExistsError(
             f"quantization comparison output already exists: {output_path}; pass --overwrite"
@@ -69,7 +78,7 @@ def write_quantization_comparison_report(
             delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
-            json.dump(report.to_dict(), temporary, indent=2, sort_keys=True)
+            json.dump(dict(payload), temporary, indent=2, sort_keys=True)
             temporary.write("\n")
             temporary.flush()
             os.fsync(temporary.fileno())
@@ -78,7 +87,6 @@ def write_quantization_comparison_report(
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-
 
 def _model_state_size_bytes(model: nn.Module) -> int:
     return sum(tensor.numel() * tensor.element_size() for tensor in model.state_dict().values())
