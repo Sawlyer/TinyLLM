@@ -129,12 +129,19 @@ uv run tinyllm train --config configs/tinyllm.yaml --max-steps 20 --checkpoint c
 uv run tinyllm train --config configs/tinyllm.yaml --resume checkpoints/latest.pt --checkpoint checkpoints/resumed.pt --max-steps 10000
 uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --batches 8
 uv run tinyllm generate --checkpoint checkpoints/resumed.pt --prompt "Once upon a time"
+uv run tinyllm generate --checkpoint checkpoints/resumed.pt --prompt "A fox" --prompt "A lake" --temperature 0.8 --top-k 40 --top-p 0.9 --repetition-penalty 1.1 --stop "<eos>" --json
 ```
 
 Checkpoint stores model, optimizer, schedule boundary, precision state, Python/PyTorch/CUDA RNG,
 loader RNG, full configuration snapshot, and model/tokenizer/corpus identities. Resume rejects
 incompatible configuration or artifacts before mutation. Generation can recover configuration
 from checkpoint; pass `--config` when intentionally validating against external configuration.
+Repeat `--prompt` to generate several prompts sequentially; each uses the configured seed. Sampling
+applies repetition penalty first, then temperature, top-k, then top-p. Repetition penalty defaults
+to `1.0` (disabled); positive logits are divided by it and negative logits multiplied by it. Repeat
+`--stop` for text sequences that end generation; stop tokens are omitted from the returned text.
+`--json` prints effective parameters plus per-prompt generated token count, tokens/second, and
+first-token latency in milliseconds. Timing starts after model loading and prompt tokenization.
 Default configuration keeps `training.max_steps: 10000`; first command stops early through CLI
 without changing checkpoint configuration snapshot. Resume therefore remains configuration-compatible
 and continues toward step 10000.
