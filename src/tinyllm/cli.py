@@ -35,6 +35,7 @@ from tinyllm.training.checkpoint import (
     TrainingState,
     inspect_checkpoint,
     load_model_checkpoint,
+    save_model_checkpoint,
 )
 from tinyllm.training.checkpoint import (
     load_checkpoint as load_training_checkpoint,
@@ -154,6 +155,14 @@ def _build_parser() -> argparse.ArgumentParser:
     quantize.add_argument("--overwrite", action="store_true")
     quantize.set_defaults(handler=_quantize_command)
 
+    export_weights = commands.add_parser(
+        "export-weights", help="export model-only inference weights from a training checkpoint"
+    )
+    export_weights.add_argument("--checkpoint", type=Path, required=True)
+    export_weights.add_argument("--output", type=Path, required=True)
+    export_weights.add_argument("--overwrite", action="store_true")
+    export_weights.set_defaults(handler=_export_weights_command)
+
     checkpoints = commands.add_parser(
         "checkpoints", help="list, inspect, and preview checkpoint retention"
     )
@@ -207,6 +216,37 @@ def _checkpoints_list_command(args: argparse.Namespace) -> None:
     )
 
 
+def _export_weights_command(args: argparse.Namespace) -> None:
+    if args.checkpoint.resolve() == args.output.resolve():
+        raise ValueError("--output cannot replace the training checkpoint")
+    _require_writable_output(
+        args.output,
+        overwrite=args.overwrite,
+        label="inference weights",
+    )
+    checkpoint = load_model_checkpoint(args.checkpoint, device="cpu")
+    save_model_checkpoint(
+        args.output,
+        checkpoint.model,
+        config_snapshot=checkpoint.config_snapshot,
+        identity=checkpoint.identity,
+        step=checkpoint.step,
+        tokens_processed=checkpoint.tokens_processed,
+        overwrite=args.overwrite,
+    )
+    print(
+        json.dumps(
+            {
+                "source_checkpoint": str(args.checkpoint),
+                "inference_weights": str(args.output),
+                "format_version": checkpoint.format_version,
+                "step": checkpoint.step,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _checkpoint_inspect_command(args: argparse.Namespace) -> None:
     info = inspect_checkpoint(args.checkpoint)
     print(
@@ -218,6 +258,11 @@ def _checkpoint_inspect_command(args: argparse.Namespace) -> None:
                 "tokens_processed": info.tokens_processed,
                 "status": info.status,
                 "reason": info.reason,
+                "artifact_type": info.artifact_type,
+                "format_version": info.format_version,
+                "created_at_utc": info.created_at_utc,
+                "producer_version": info.producer_version,
+                "migrated_from_version": info.migrated_from_version,
                 "model_config": info.model_config,
                 "tokenizer_sha256": info.tokenizer_sha256,
                 "corpus_sha256": info.corpus_sha256,
