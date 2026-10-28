@@ -158,6 +158,24 @@ uv run tinyllm interactive --checkpoint checkpoints/resumed.pt --history-file ou
 uv run tinyllm profile-training --config configs/tinyllm.yaml --warmup-steps 2 --steps 3 --trace outputs/profile.json --output outputs/report.json
 ```
 
+
+### Supervised fine-tuning
+
+Fine-tune a saved model for a narrow task with separate prompt/completion JSONL files. Each non-empty line must contain exactly two string fields; no chat template is applied automatically:
+
+```jsonl
+{"prompt":"Question: What is 2 + 2?\nAnswer:","completion":" 4"}
+```
+
+Keep training and validation examples in separate files. The prompt is included as context but excluded from the loss; completion tokens and the tokenizer's `<eos>` token are scored. Batches use right padding, with no cross-example packing. The base checkpoint is preserved, and the new inference checkpoint gets a `.finetune.json` sidecar containing dataset and tokenizer hashes, settings, environment, and train/validation metrics.
+
+```powershell
+uv run tinyllm finetune --checkpoint checkpoints/latest.pt --train-data data/task-train.jsonl --validation-data data/task-validation.jsonl --output checkpoints/task-tuned.pt --max-steps 200 --device cuda
+uv run tinyllm generate --checkpoint checkpoints/task-tuned.pt --prompt "Question: What is 2 + 2?\\nAnswer:"
+```
+
+This command updates all model parameters and does not implement LoRA or multi-turn templates. Full fine-tuning needs optimizer memory as well as model memory; start with a small model and short run, or use `--device cpu` when GPU memory is insufficient. Review held-out loss and generated examples; these metrics do not establish safety or factuality.
+
 Checkpoint stores model, optimizer, schedule boundary, precision state, Python/PyTorch/CUDA RNG,
 loader RNG, full configuration snapshot, and model/tokenizer/corpus identities. Resume rejects
 incompatible configuration or artifacts before mutation. Generation can recover configuration
