@@ -269,7 +269,7 @@ uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 -
 ```
 
 The default model has about 40 million parameters. FP32 parameters, gradients, and AdamW's two
-FP32 moment tensors account for roughly 640 MB (610 MiB) before activations, CUDA context, temporary
+FP32 moment tensors account for about 638 MB (608 MiB) before activations, CUDA context, temporary
 workspaces, and allocator overhead. BF16 autocast does not make this a reliable peak-VRAM estimate.
 Use the short profile command with the same batch and context settings to measure the target device:
 
@@ -295,8 +295,15 @@ uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 -
 ```
 
 Each candidate processes 204,800 training tokens. Evaluate all checkpoints on the same validation
-split and token budget, for example `--tokens 8192 --seed 42`. Compare validation loss, its batch
-variation, tokens/second, and peak VRAM together. A short run is noisy: do not auto-select a winner
+split and token budget. For example:
+
+```powershell
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0001/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0001/eval.json
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0002/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0002/eval.json
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0003/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0003/eval.json
+```
+
+Compare validation loss, its batch variation, tokens/second, and peak VRAM together. A short run is noisy: do not auto-select a winner
 from one score. Rerun the shortlist for a larger token budget and, where compute allows, more than
 one seed. Test weight decay or warmup only in a separate sweep after choosing a reasonable learning
 rate range.
