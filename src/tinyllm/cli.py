@@ -34,6 +34,10 @@ from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
 from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchmark_report
 from tinyllm.inference.generate import generate
 from tinyllm.inference.local_llama import load_local_llama
+from tinyllm.inference.memory import (
+    estimate_kv_cache_memory,
+    require_available_kv_cache_memory,
+)
 from tinyllm.inference.onnx import export_onnx_forward
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
 from tinyllm.inference.quantization_eval import (
@@ -229,6 +233,17 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--quantized", action="store_true")
     generate_parser.add_argument("--no-cache", action="store_true")
     generate_parser.set_defaults(handler=_generate_command)
+
+    cache_estimate = commands.add_parser(
+        "estimate-kv-cache", help="estimate autoregressive key/value cache memory"
+    )
+    _add_config_arguments(cache_estimate, default=None)
+    cache_estimate.add_argument("--batch-size", type=int, default=1)
+    cache_estimate.add_argument("--context-length", type=int)
+    cache_estimate.add_argument(
+        "--dtype", choices=("float16", "bfloat16", "float32", "float64"), default="float32"
+    )
+    cache_estimate.set_defaults(handler=_estimate_kv_cache_command)
 
     inference_benchmark = commands.add_parser(
         "benchmark-inference", help="compare cached and uncached autoregressive generation"
@@ -1099,6 +1114,20 @@ def _compare_quantization_command(args: argparse.Namespace) -> None:
     )
 
 
+def _estimate_kv_cache_command(args: argparse.Namespace) -> None:
+    config = _load_args_config(args)
+    context_length = (
+        config.model.max_seq_len if args.context_length is None else args.context_length
+    )
+    dtype = getattr(torch, args.dtype)
+    estimate = estimate_kv_cache_memory(
+        config.model,
+        batch_size=args.batch_size,
+        context_length=context_length,
+        dtype=dtype,
+    )
+    print(json.dumps(estimate.to_dict(), sort_keys=True))
+
 def _generate_command(args: argparse.Namespace) -> None:
     if args.quantized:
         if args.config is None:
@@ -1151,6 +1180,18 @@ def _generate_command(args: argparse.Namespace) -> None:
         generation_values["eos_token_id"] = eos_token_id
     validate_tokenizer_for_model(tokenizer, model_config)
     generation = GenerationConfig.model_validate(generation_values)
+    if device.type == "cuda" and not args.no_cache:
+        estimate = estimate_kv_cache_memory(
+            model_config,
+            batch_size=1,
+            context_length=model_config.max_seq_len,
+            dtype=next(model.parameters()).dtype,
+        )
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+        reserved_bytes = torch.cuda.memory_reserved(device)
+        allocated_bytes = torch.cuda.memory_allocated(device)
+        available_bytes = free_bytes + max(0, reserved_bytes - allocated_bytes)
+        require_available_kv_cache_memory(estimate, available_bytes=available_bytes)
     stop_sequences = [list(sequence) for sequence in generation.stop_token_sequences]
     results = []
     for prompt in args.prompt:
