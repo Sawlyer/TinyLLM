@@ -117,9 +117,12 @@ Validate configuration without allocating CUDA training state or starting optimi
 uv run tinyllm train --config configs/tinyllm.yaml --dry-run
 ```
 
-Dry run validates available dataset identity, computes parameter count, effective batch, tokens
-per optimizer step, requested precision, and target device. Default effective batch is 16 micro
-sequences times 8 accumulation steps: 128 sequences or 65,536 tokens per optimizer step.
+Dry run emits a JSON preflight report. It checks prepared corpus compatibility when artifacts exist,
+device and precision support, output paths, checkpoint collisions, and estimated checkpoint storage.
+It does not download data, create output files, instantiate the model, or allocate CUDA tensors.
+Missing prepared data and deferred FP8 kernel probing appear as warnings; predictable failures appear
+with a field, path, cause, and suggested fix. Default effective batch is 16 micro sequences times 8
+accumulation steps: 128 sequences or 65,536 tokens per optimizer step.
 
 ```powershell
 uv run tinyllm train --config configs/tinyllm.yaml --max-steps 20 --checkpoint checkpoints/latest.pt
@@ -252,3 +255,4 @@ destination is preserved on failure and replaced only with `--overwrite`.
 - dataset sampling context: [The 1 Billion Token Challenge](https://huggingface.co/blog/codelion/optimal-dataset-mixing/)
 - PyTorch, Hugging Face Datasets, Tokenizers, TensorBoard, Pydantic, PyYAML, and optional
   TorchAO power runtime and tooling.
+
