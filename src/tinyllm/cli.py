@@ -55,7 +55,8 @@ from tinyllm.training.finetune import (
     load_supervised_dataset,
     run_supervised_finetuning,
     write_finetuning_manifest,
-)from tinyllm.training.metrics import MetricLogger
+)
+from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.precision import PrecisionPolicy
 from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
 from tinyllm.training.trainer import Trainer, _resolve_device
