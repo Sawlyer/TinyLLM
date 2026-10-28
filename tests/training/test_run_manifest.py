@@ -1,5 +1,8 @@
 import argparse
 import json
+import signal
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -97,6 +100,116 @@ def test_run_manifest_omits_unavailable_source_and_system_metadata(monkeypatch):
     assert "accelerator" not in payload
 
 
+def test_runtime_metadata_records_cuda_runtime_when_available(monkeypatch):
+    monkeypatch.setattr(
+        run_manifest.importlib.metadata,
+        "version",
+        lambda distribution: f"{distribution}-test",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(version=SimpleNamespace(cuda="12.4")),
+    )
+
+    assert run_manifest._runtime_metadata()["cuda"] == "12.4"
+
+
+def test_run_manifest_records_corpus_manifest_and_declared_data_checksums(tmp_path):
+    config = _config()
+    output_dir = tmp_path / "prepared"
+    output_dir.mkdir()
+    (output_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_sha256": "a" * 64,
+                "artifacts": {
+                    "train": {"sha256": "b" * 64},
+                    "validation": {"sha256": "c" * 64},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = config.model_copy(
+        update={"data": config.data.model_copy(update={"output_dir": output_dir})}
+    )
+
+    digests = run_manifest._artifact_digests(config, argparse.Namespace())
+
+    assert digests["data.corpus_manifest"] == run_manifest._file_sha256(
+        output_dir / "manifest.json"
+    )
+    assert digests["data.tokenizer"] == "a" * 64
+    assert digests["data.train_tokens"] == "b" * 64
+    assert digests["data.validation_tokens"] == "c" * 64
+
+
+def test_run_manifest_preserves_unreadable_prior_manifest(tmp_path):
+    config = _config()
+    run_dir = tmp_path / "runs"
+    config = config.model_copy(
+        update={"logging": config.logging.model_copy(update={"run_dir": run_dir})}
+    )
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text("{invalid", encoding="utf-8")
+
+    run_manifest.start_run_manifest(
+        config,
+        argparse.Namespace(command="train", resume=None),
+        started_at="2026-10-28T12:00:00Z",
+    )
+
+    archives = list(run_dir.glob("run-invalid-*.json"))
+    assert len(archives) == 1
+    assert archives[0].read_text(encoding="utf-8") == "{invalid"
+
+
+def test_archive_rejects_path_components_in_run_id(tmp_path):
+    manifest_path = tmp_path / "run.json"
+    manifest_path.write_text('{"run_id":"../../outside"}', encoding="utf-8")
+
+    run_manifest._archive_current_manifest(
+        manifest_path, {"run_id": "../../outside"}
+    )
+
+    assert not (tmp_path.parent / "outside.json").exists()
+    archives = list(tmp_path.glob("run-*.json"))
+    assert len(archives) == 1
+
+
+def test_sigterm_handler_maps_termination_to_interrupted_run(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    from tinyllm import cli
+
+    config = _config()
+    config = config.model_copy(
+        update={"logging": config.logging.model_copy(update={"run_dir": tmp_path / "runs"})}
+    )
+    registered = {}
+    original_signal = signal.signal
+
+    def capture_signal(signum, handler):
+        previous = original_signal(signum, handler)
+        if signum == signal.SIGTERM:
+            registered[signum] = handler
+        return previous
+
+    monkeypatch.setattr(cli.signal, "signal", capture_signal)
+
+    class TerminatingTrainer(_FakeTrainer):
+        def train(self, *, max_steps: int | None, overwrite_checkpoints: bool):
+            registered[signal.SIGTERM](signal.SIGTERM, None)
+
+    trainer = TerminatingTrainer(tmp_path / "latest.pt")
+    _install_cli_fakes(monkeypatch, cli, config, trainer)
+    with pytest.raises(KeyboardInterrupt):
+        cli._train_command(_train_args(tmp_path / "latest.pt"))
+
+    manifest = json.loads((tmp_path / "runs" / "run.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "interrupted"
+
+
 def test_write_run_manifest_replaces_atomically_and_preserves_old_file_on_failure(
     monkeypatch, tmp_path
 ):
@@ -115,7 +228,7 @@ def test_write_run_manifest_replaces_atomically_and_preserves_old_file_on_failur
 
 
 class _FakeTrainer:
-    def __init__(self, checkpoint: Path, failure: Exception | None = None):
+    def __init__(self, checkpoint: Path, failure: BaseException | None = None):
         self.checkpoint = checkpoint
         self.failure = failure
 
@@ -208,6 +321,25 @@ def test_train_command_marks_manifest_failed_when_training_raises(monkeypatch, t
 
     manifest = json.loads((tmp_path / "runs" / "run.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "failed"
+    assert manifest["finished_at"] is not None
+
+
+def test_train_command_marks_manifest_interrupted_on_keyboard_interrupt(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    from tinyllm import cli
+
+    config = _config()
+    config = config.model_copy(
+        update={"logging": config.logging.model_copy(update={"run_dir": tmp_path / "runs"})}
+    )
+    trainer = _FakeTrainer(tmp_path / "latest.pt", failure=KeyboardInterrupt())
+    _install_cli_fakes(monkeypatch, cli, config, trainer)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli._train_command(_train_args(tmp_path / "latest.pt"))
+
+    manifest = json.loads((tmp_path / "runs" / "run.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "interrupted"
     assert manifest["finished_at"] is not None
 
 
