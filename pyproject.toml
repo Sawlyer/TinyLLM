@@ -24,6 +24,7 @@ dev = [
     "ruff>=0.6",
 ]
 fp8 = ["torchao==0.18.0"]
+onnx = ["onnx>=1.17", "onnxscript>=0.3", "onnxruntime>=1.20", "torch>=2.6"]
 
 [project.scripts]
 tinyllm = "tinyllm.cli:main"
