@@ -33,6 +33,7 @@ from tinyllm.data.validation import validate_manifest_for_model, validate_tokeni
 from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
 from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchmark_report
 from tinyllm.inference.generate import generate
+from tinyllm.inference.onnx import export_onnx_forward
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
@@ -263,6 +264,15 @@ def _build_parser() -> argparse.ArgumentParser:
     export_weights.add_argument("--overwrite", action="store_true")
     export_weights.set_defaults(handler=_export_weights_command)
 
+    export_onnx = commands.add_parser(
+        "export-onnx", help="export and verify a portable logits-only ONNX model"
+    )
+    _add_config_arguments(export_onnx, default=None)
+    export_onnx.add_argument("--checkpoint", type=Path, required=True)
+    export_onnx.add_argument("--output", type=Path, required=True)
+    export_onnx.add_argument("--overwrite", action="store_true")
+    export_onnx.set_defaults(handler=_export_onnx_command)
+
     checkpoints = commands.add_parser(
         "checkpoints", help="list, inspect, and preview checkpoint retention"
     )
@@ -314,6 +324,43 @@ def _checkpoints_list_command(args: argparse.Namespace) -> None:
             sort_keys=True,
         )
     )
+
+
+def _export_onnx_command(args: argparse.Namespace) -> None:
+    if args.checkpoint.resolve() == args.output.resolve():
+        raise ValueError("--output cannot replace the source checkpoint")
+    _require_writable_output(args.output, overwrite=args.overwrite, label="ONNX export")
+    config = _config_for_checkpoint(args.checkpoint, args.config, args.overrides)
+    checkpoint = load_model_checkpoint(args.checkpoint, device="cpu")
+    model_config = ModelConfig.model_validate(checkpoint.identity.model_config)
+    _require_model_config_match(model_config.model_dump(mode="json"), config.model)
+    if sha256_file(config.tokenizer.path) != checkpoint.identity.tokenizer_sha256:
+        raise ValueError("tokenizer checksum differs from checkpoint identity")
+    tokenizer = _load_tokenizer(config.tokenizer.path)
+    validate_tokenizer_for_model(tokenizer, model_config)
+    report = export_onnx_forward(
+        checkpoint.model,
+        args.output,
+        metadata={
+            "source_checkpoint_sha256": sha256_file(args.checkpoint),
+            "tokenizer_sha256": checkpoint.identity.tokenizer_sha256,
+            "checkpoint_step": checkpoint.step,
+        },
+        overwrite=args.overwrite,
+    )
+    print(
+        json.dumps(
+            {
+                "onnx_model": str(report.output_path),
+                "opset_version": report.opset_version,
+                "verified_shapes": [list(shape) for shape in report.verified_shapes],
+                "cpu_provider": report.cpu_provider,
+                "cuda_verified": report.cuda_verified,
+            },
+            sort_keys=True,
+        )
+    )
+
 
 
 def _export_weights_command(args: argparse.Namespace) -> None:
