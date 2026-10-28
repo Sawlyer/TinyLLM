@@ -293,6 +293,22 @@ uv run tinyllm train --config configs/tinyllm.yaml --set training.max_steps=2000
 Unknown keys and invalid values fail validation. Keep `training.warmup_steps` below
 `training.max_steps`.
 
+## Inference cache benchmark
+
+Compare autoregressive generation with the KV cache enabled and disabled on the same checkpoint
+and prompt. The command uses greedy decoding, excludes warmup runs, alternates measured run order,
+and checks that both modes produce identical tokens. It reports first-token latency, total and
+post-first-token throughput, peak CUDA memory, and theoretical KV-cache capacity for the model
+context. CUDA timings synchronize around each measured run; CPU timing is supported too.
+
+Keep the prompt, checkpoint, device, token count, software versions, and background load fixed when
+comparing runs. The KV capacity is a model-size estimate, not measured allocator usage. Output is
+JSON; an existing output file requires `--overwrite`.
+
+```powershell
+uv run tinyllm benchmark-inference --checkpoint checkpoints/latest.pt --prompt "Once upon a time" --max-new-tokens 64 --warmup-runs 2 --measured-runs 5 --output runs/inference-benchmark.json
+```
+
 ## BF16/FP8 benchmark
 
 Benchmark modes receive same initialized weights, seed, batch shapes, and pre-generated token
