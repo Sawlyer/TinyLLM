@@ -415,7 +415,11 @@ def _prepare_command(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "manifest": str(_manifest_path(config)),
-                "quality_report": str(config.data.output_dir / "quality-report.json"),
+                "quality_report": (
+                    str(config.data.output_dir / "quality-report.json")
+                    if (config.data.output_dir / "quality-report.json").is_file()
+                    else None
+                ),
                 "dataset": manifest.dataset_name,
                 "dataset_revision": manifest.dataset_revision,
                 "dataset_fingerprint": manifest.dataset_fingerprint,
