@@ -14,6 +14,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from tokenizers import Tokenizer
@@ -119,12 +120,15 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser = commands.add_parser("generate", help="generate text from a checkpoint")
     _add_config_arguments(generate_parser, default=None)
     generate_parser.add_argument("--checkpoint", type=Path, required=True)
-    generate_parser.add_argument("--prompt", required=True)
+    generate_parser.add_argument("--prompt", action="append", required=True)
     generate_parser.add_argument("--max-new-tokens", type=int)
     generate_parser.add_argument("--temperature", type=float)
     generate_parser.add_argument("--top-k", type=int)
     generate_parser.add_argument("--top-p", type=float)
+    generate_parser.add_argument("--repetition-penalty", type=float)
+    generate_parser.add_argument("--stop", action="append", default=[])
     generate_parser.add_argument("--seed", type=int)
+    generate_parser.add_argument("--json", action="store_true", dest="json_output")
     generate_parser.add_argument("--device")
     generate_parser.add_argument("--quantized", action="store_true")
     generate_parser.add_argument("--no-cache", action="store_true")
@@ -544,9 +548,6 @@ def _generate_command(args: argparse.Namespace) -> None:
     if sha256_file(tokenizer_path) != expected_tokenizer_sha256:
         raise ValueError("tokenizer checksum differs from checkpoint identity")
     tokenizer = _load_tokenizer(tokenizer_path)
-    prompt_ids = tokenizer.encode(args.prompt).ids
-    if not prompt_ids:
-        raise ValueError("prompt produced no tokens")
     generation_values = config.generation.model_dump()
     generation_values.update(
         {
@@ -556,32 +557,88 @@ def _generate_command(args: argparse.Namespace) -> None:
                 "temperature": args.temperature,
                 "top_k": args.top_k,
                 "top_p": args.top_p,
+                "repetition_penalty": args.repetition_penalty,
                 "seed": args.seed,
             }.items()
             if value is not None
         }
     )
+    if args.stop:
+        stop_sequences = [tokenizer.encode(value).ids for value in args.stop]
+        if any(not sequence for sequence in stop_sequences):
+            raise ValueError("each --stop value must produce at least one token")
+        generation_values["stop_token_sequences"] = stop_sequences
     if generation_values["eos_token_id"] is None:
         eos_token_id = tokenizer.token_to_id("<eos>")
         if eos_token_id is None:
             raise ValueError("validated tokenizer does not contain required <eos> token")
         generation_values["eos_token_id"] = eos_token_id
     validate_tokenizer_for_model(tokenizer, model_config)
-    if min(prompt_ids) < 0 or max(prompt_ids) >= model_config.vocab_size:
-        raise ValueError("prompt contains token IDs outside model vocab_size")
     generation = GenerationConfig.model_validate(generation_values)
-    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    output_ids = generate(
-        model,
-        input_ids,
-        generation,
-        use_cache=not args.no_cache,
-    )
-    new_ids = output_ids[0, len(prompt_ids) :].tolist()
-    continuation = tokenizer.decode(new_ids, skip_special_tokens=False)
-    if not continuation:
-        continuation = "".join(f"<token:{token_id}>" for token_id in new_ids)
-    print(f"{args.prompt}{continuation}")
+    stop_sequences = [list(sequence) for sequence in generation.stop_token_sequences]
+    results = []
+    for prompt in args.prompt:
+        prompt_ids = tokenizer.encode(prompt).ids
+        if not prompt_ids:
+            raise ValueError("prompt produced no tokens")
+        if min(prompt_ids) < 0 or max(prompt_ids) >= model_config.vocab_size:
+            raise ValueError("prompt contains token IDs outside model vocab_size")
+        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started_at = perf_counter()
+        first_token_at: float | None = None
+
+        def mark_first_token() -> None:
+            nonlocal first_token_at
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            first_token_at = perf_counter()
+
+        output_ids = generate(
+            model,
+            input_ids,
+            generation,
+            use_cache=not args.no_cache,
+            on_first_token=mark_first_token,
+        )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed = max(perf_counter() - started_at, 1e-12)
+        new_ids = output_ids[0, len(prompt_ids) :].tolist()
+        matched_stop_length = max(
+            (
+                len(stop_sequence)
+                for stop_sequence in stop_sequences
+                if len(new_ids) >= len(stop_sequence)
+                and new_ids[-len(stop_sequence) :] == stop_sequence
+            ),
+            default=0,
+        )
+        if matched_stop_length:
+            del new_ids[-matched_stop_length:]
+        continuation = tokenizer.decode(new_ids, skip_special_tokens=False)
+        if not continuation:
+            continuation = "".join(f"<token:{token_id}>" for token_id in new_ids)
+        results.append(
+            {
+                "prompt": prompt,
+                "continuation": continuation,
+                "text": f"{prompt}{continuation}",
+                "generated_tokens": len(new_ids),
+                "tokens_per_second": len(new_ids) / elapsed,
+                "first_token_latency_ms": (
+                    (first_token_at - started_at) * 1000 if first_token_at is not None else None
+                ),
+            }
+        )
+    if args.json_output:
+        print(json.dumps({"parameters": generation.model_dump(mode="json"), "results": results}))
+    elif len(results) == 1:
+        print(results[0]["text"])
+    else:
+        for index, result in enumerate(results, start=1):
+            print(f"[{index}] {result['text']}")
 
 
 def _benchmark_precision_command(args: argparse.Namespace) -> None:
