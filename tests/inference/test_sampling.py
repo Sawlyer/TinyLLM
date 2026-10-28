@@ -87,6 +87,56 @@ def test_top_k_excludes_tokens_below_cutoff() -> None:
     assert set(sampled.flatten().tolist()) == {2, 3}
 
 
+def test_repetition_penalty_changes_top_k_choice_before_filtering() -> None:
+    sampled = sample_next(
+        torch.tensor([[10.0, 9.0, 8.0]]),
+        temperature=1.0,
+        top_k=1,
+        top_p=1.0,
+        generator=torch.Generator().manual_seed(0),
+        input_ids=torch.tensor([[0]]),
+        repetition_penalty=2.0,
+    )
+
+    assert sampled.item() == 1
+
+
+@pytest.mark.parametrize("repetition_penalty", [0.0, -1.0, float("nan"), float("inf")])
+def test_sampling_rejects_invalid_repetition_penalty(repetition_penalty: float) -> None:
+    with pytest.raises(ValueError, match="repetition_penalty"):
+        sample_next(
+            torch.tensor([[1.0, 2.0]]),
+            temperature=1.0,
+            top_k=None,
+            top_p=1.0,
+            generator=torch.Generator().manual_seed(0),
+            repetition_penalty=repetition_penalty,
+        )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"seed": -1},
+        {"repetition_penalty": float("inf")},
+        {"stop_token_sequences": [[]]},
+        {"stop_token_sequences": [[-1]]},
+    ],
+)
+def test_generation_config_rejects_invalid_generation_controls(values: dict[str, object]) -> None:
+    options: dict[str, object] = {
+        "max_new_tokens": 4,
+        "temperature": 1.0,
+        "top_k": None,
+        "top_p": 1.0,
+        "seed": 4,
+    }
+    options.update(values)
+
+    with pytest.raises(ValueError):
+        GenerationConfig(**options)
+
+
 def test_top_k_keeps_exactly_k_indices_when_cutoff_logits_are_tied() -> None:
     logits = torch.tensor([[3.0, 2.0, 2.0, 2.0]]).expand(512, -1)
 
@@ -158,3 +208,4 @@ def test_sampling_rejects_rows_without_finite_logits() -> None:
             top_p=1.0,
             generator=torch.Generator().manual_seed(0),
         )
+
