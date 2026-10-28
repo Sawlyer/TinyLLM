@@ -343,6 +343,45 @@ def test_train_command_marks_manifest_interrupted_on_keyboard_interrupt(monkeypa
     assert manifest["finished_at"] is not None
 
 
+def test_train_command_links_metric_records_to_run_manifest(monkeypatch, tmp_path):
+    pytest.importorskip("torch")
+    from tinyllm import cli
+
+    config = _config()
+    config = config.model_copy(
+        update={"logging": config.logging.model_copy(update={"run_dir": tmp_path / "runs"})}
+    )
+
+    class MetricTrainer(cli.Trainer):
+        def __init__(self):
+            self.metric_logger = None
+
+        def train(self, *, max_steps: int | None, overwrite_checkpoints: bool):
+            self.metric_logger.log(1, {"loss": 0.5})
+            return argparse.Namespace(
+                steps=1,
+                initial_loss=1.0,
+                final_loss=0.5,
+                validation_loss=None,
+                tokens_processed=32,
+                elapsed_seconds=1.0,
+            )
+
+        def save_checkpoint(self, path: Path) -> None:
+            path.write_bytes(b"checkpoint-v1")
+
+    trainer = MetricTrainer()
+    _install_cli_fakes(monkeypatch, cli, config, trainer)
+
+    cli._train_command(_train_args(tmp_path / "latest.pt"))
+
+    manifest = json.loads((tmp_path / "runs" / "run.json").read_text(encoding="utf-8"))
+    metric = json.loads(
+        (tmp_path / "runs" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert metric["run_id"] == manifest["run_id"]
+
+
 def test_resume_restores_matching_archived_manifest(monkeypatch, tmp_path):
     config = _config()
     checkpoint_dir = tmp_path / "checkpoints"
@@ -452,4 +491,3 @@ def test_resume_does_not_match_non_checkpoint_artifact_digest(tmp_path):
     )
 
     assert resumed["run_id"] != initial["run_id"]
-
