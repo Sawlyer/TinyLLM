@@ -7,6 +7,7 @@ import json
 import math
 import random
 import signal
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_check
 from tinyllm.model.transformer import TinyLLM, count_parameters
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
 from tinyllm.training.checkpoint import load_model_checkpoint
+from tinyllm.training.evaluation import evaluate_model, write_evaluation_report
 from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
 from tinyllm.training.trainer import Trainer
@@ -80,7 +82,13 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate = commands.add_parser("evaluate", help="evaluate a training checkpoint")
     _add_config_arguments(evaluate)
     evaluate.add_argument("--checkpoint", type=Path, required=True)
-    evaluate.add_argument("--batches", type=int, default=8)
+    evaluation_size = evaluate.add_mutually_exclusive_group()
+    evaluation_size.add_argument("--batches", type=int, default=8)
+    evaluation_size.add_argument("--tokens", type=int)
+    evaluate.add_argument("--split", choices=("train", "validation"), default="validation")
+    evaluate.add_argument("--seed", type=int, default=42)
+    evaluate.add_argument("--output", type=Path)
+    evaluate.add_argument("--overwrite", action="store_true")
     evaluate.add_argument("--device")
     evaluate.set_defaults(handler=_evaluate_command)
 
@@ -251,30 +259,66 @@ def _inspect_data_command(args: argparse.Namespace) -> None:
 
 
 def _evaluate_command(args: argparse.Namespace) -> None:
+    if args.output is not None and args.output.resolve() == args.checkpoint.resolve():
+        raise ValueError("--output cannot replace the evaluation checkpoint")
     config = _load_args_config(args)
-    if type(args.batches) is not int or args.batches <= 0:
+    if type(args.seed) is not int:
+        raise ValueError("--seed must be an integer")
+    if args.tokens is not None and (type(args.tokens) is not int or args.tokens <= 0):
+        raise ValueError("--tokens must be a positive integer")
+    if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
         raise ValueError("--batches must be a positive integer")
-    manifest = _validated_manifest(config, splits={"validation"})
-    validation_dataset = _dataset(config, manifest, "validation", required=False)
-    if validation_dataset is None:
-        raise ValueError("validation split is too small for configured sequence length")
+    manifest = _validated_manifest(config, splits={args.split})
+    dataset = _dataset(config, manifest, args.split, required=False)
+    if dataset is None:
+        raise ValueError(f"{args.split} split is too small for configured sequence length")
     device = _resolve_inference_device(args.device or config.training.device)
     loaded = load_model_checkpoint(args.checkpoint, device=device)
     _require_model_config_match(loaded.identity.model_config, config.model)
-    validation_loss = _evaluate_validation_model(
+    report = evaluate_model(
         loaded.model,
-        validation_dataset,
-        args.batches,
+        dataset,
+        split=args.split,
+        seed=args.seed,
         batch_size=config.training.micro_batch_size,
-        device=device,
+        batches=args.batches if args.tokens is None else None,
+        tokens=args.tokens,
+        checkpoint_sha256=sha256_file(args.checkpoint),
+        corpus_sha256=manifest.artifacts[args.split].sha256,
     )
+    if args.output is not None:
+        write_evaluation_report(report, args.output, overwrite=args.overwrite)
+    print(
+        f"Evaluated {report.evaluated_tokens} target tokens across {report.batches} batches "
+        f"from split '{report.split}' (seed {report.seed}).",
+        file=sys.stderr,
+    )
+    print(
+        f"Mean loss: {report.mean_loss:.6f} nats/token "
+        f"(batch standard deviation {report.batch_loss_std:.6f}); "
+        f"perplexity: {report.perplexity:.6f}.",
+        file=sys.stderr,
+    )
+    print(f"Checkpoint SHA-256: {report.checkpoint_sha256}", file=sys.stderr)
+    print(f"Corpus SHA-256: {report.corpus_sha256}", file=sys.stderr)
+    if args.output is not None:
+        print(f"Report saved to {args.output}", file=sys.stderr)
     print(
         json.dumps(
             {
-                "batches": args.batches,
+                "batches": report.batches,
                 "checkpoint": str(args.checkpoint),
-                "validation_loss": validation_loss,
-                "validation_perplexity": _safe_perplexity(validation_loss),
+                "evaluated_sequences": report.evaluated_sequences,
+                "evaluated_tokens": report.evaluated_tokens,
+                "mean_loss": report.mean_loss,
+                "perplexity": report.perplexity,
+                "perplexity_saturated": report.perplexity_saturated,
+                "seed": report.seed,
+                "split": report.split,
+                "validation_loss": report.mean_loss if report.split == "validation" else None,
+                "validation_perplexity": report.perplexity
+                if report.split == "validation"
+                else None,
             },
             sort_keys=True,
         )
@@ -446,34 +490,6 @@ def _print_train_dry_run(config: TinyLLMConfig) -> None:
     print(f"expected steps: {expected_steps}")
     print(f"precision: {config.training.precision.upper()}")
     print(f"device: {device}")
-
-
-def _evaluate_validation_model(
-    model: torch.nn.Module,
-    dataset: TokenDataset,
-    batches: int,
-    *,
-    batch_size: int,
-    device: torch.device,
-) -> float:
-    losses: list[float] = []
-    model.eval()
-    with torch.no_grad():
-        for batch_index in range(batches):
-            start = batch_index * batch_size
-            positions = torch.arange(
-                start,
-                start + batch_size,
-                dtype=torch.long,
-            ) % len(dataset)
-            inputs, targets = dataset.batch(positions)
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            output = model(inputs, targets)
-            if output.loss is None or not bool(torch.isfinite(output.loss)):
-                raise ValueError("validation produced a non-finite loss")
-            losses.append(float(output.loss))
-    return sum(losses) / len(losses)
 
 
 def _safe_perplexity(loss: float) -> float:
