@@ -92,6 +92,8 @@ class InteractiveSession:
                 self._generate(prompt)
             except KeyboardInterrupt:
                 self.output_fn("\nGénération interrompue. Session toujours active.")
+            except ValueError as error:
+                self.output_fn(f"Génération impossible : {error}")
 
     def _generate(self, prompt: str) -> None:
         prompt_ids = self.tokenizer.encode(prompt).ids
