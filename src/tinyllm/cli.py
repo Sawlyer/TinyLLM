@@ -1890,9 +1890,11 @@ def _local_documents(dataset_name: str) -> Iterable[str] | None:
                 text = line.strip()
                 if text:
                     yield text
+
     return read_lines()
 
 
 def _require_writable_output(path: Path, *, overwrite: bool, label: str) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
+
