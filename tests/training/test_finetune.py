@@ -7,12 +7,12 @@ import torch
 
 from tinyllm.cli import _build_parser
 from tinyllm.config.schema import ModelConfig, TrainingConfig
+from tinyllm.model.transformer import TinyLLM
 from tinyllm.training.finetune import (
     load_supervised_dataset,
     run_supervised_finetuning,
     write_finetuning_manifest,
 )
-from tinyllm.model.transformer import TinyLLM
 
 
 class FakeTokenizer:
