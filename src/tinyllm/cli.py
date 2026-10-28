@@ -183,8 +183,13 @@ def _prepare_command(args: argparse.Namespace) -> None:
 
 def _train_command(args: argparse.Namespace) -> None:
     config = _load_args_config(args)
+    precision_policy_sink: list[PrecisionPolicy] = []
     report = _build_training_preflight_report(
-        config, args, require_data=not args.dry_run, dry_run=args.dry_run
+        config,
+        args,
+        require_data=not args.dry_run,
+        dry_run=args.dry_run,
+        precision_policy_sink=precision_policy_sink,
     )
     if args.dry_run:
         print(json.dumps(report, sort_keys=True))
@@ -197,7 +202,10 @@ def _train_command(args: argparse.Namespace) -> None:
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
     status = "failed"
     try:
-        trainer, _ = _build_cli_trainer(config)
+        if precision_policy_sink:
+            trainer, _ = _build_cli_trainer(config, precision_policy=precision_policy_sink[0])
+        else:
+            trainer, _ = _build_cli_trainer(config)
         if isinstance(trainer, Trainer) and trainer.metric_logger is None:
             trainer.metric_logger = MetricLogger(
                 config.logging.run_dir,
@@ -472,10 +480,12 @@ def _build_training_preflight_report(
     *,
     require_data: bool,
     dry_run: bool = False,
+    precision_policy_sink: list[PrecisionPolicy] | None = None,
 ) -> dict[str, object]:
     args = args or argparse.Namespace(checkpoint=None, resume=None, overwrite=False, max_steps=None)
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
+    fp8_requested = False
 
     def issue(
         target: list[dict[str, str]], field: str, path: Path | None, cause: str, fix: str
@@ -509,6 +519,7 @@ def _build_training_preflight_report(
         precision = config.training.precision.lower()
         try:
             if precision == "fp8":
+                fp8_requested = True
                 if device.type != "cuda" or not torch.cuda.is_available():
                     raise ValueError("FP8 requires an available CUDA device")
                 if device.index is not None and device.index >= torch.cuda.device_count():
@@ -530,8 +541,6 @@ def _build_training_preflight_report(
                         "FP8 kernel probe deferred; dry-run does not compile kernels",
                         "Run training on target GPU to validate FP8 kernel and TorchAO conversion.",
                     )
-                else:
-                    PrecisionPolicy.create(precision, device)
             else:
                 PrecisionPolicy.create(precision, device)
         except (RuntimeError, ValueError, ImportError, TinyLLMUserError) as error:
@@ -676,6 +685,20 @@ def _build_training_preflight_report(
                 "Confirm sufficient disk space on the target volume.",
             )
 
+    if fp8_requested and not dry_run and not errors:
+        try:
+            fp8_policy = PrecisionPolicy.create("fp8", device)
+            if precision_policy_sink is not None:
+                precision_policy_sink.append(fp8_policy)
+        except (RuntimeError, ValueError, ImportError, TinyLLMUserError) as error:
+            issue(
+                errors,
+                "training.precision",
+                None,
+                str(error),
+                "Choose a supported precision for the selected device.",
+            )
+
     status = "error" if errors else "warning" if warnings else "ok"
     return {
         "status": status,
@@ -724,10 +747,16 @@ def _config_for_checkpoint(
     return TinyLLMConfig.model_validate(dict(snapshot))
 
 
-def _build_trainer(config: TinyLLMConfig) -> tuple[Trainer, TokenDataset | None]:
+def _build_trainer(
+    config: TinyLLMConfig,
+    *,
+    precision_policy: PrecisionPolicy | None = None,
+) -> tuple[Trainer, TokenDataset | None]:
     manifest = _validated_manifest(config)
     resolved_device = _resolve_device(config.training.device)
-    precision_policy = PrecisionPolicy.create(config.training.precision, resolved_device)
+    resolved_precision = precision_policy or PrecisionPolicy.create(
+        config.training.precision, resolved_device
+    )
     train_dataset = _dataset(config, manifest, "train", required=True)
     validation_dataset = _dataset(config, manifest, "validation", required=False)
     random.seed(config.training.seed)
@@ -738,14 +767,18 @@ def _build_trainer(config: TinyLLMConfig) -> tuple[Trainer, TokenDataset | None]
         model,
         train_dataset,
         validation_dataset,
-        precision_policy=precision_policy,
+        precision_policy=resolved_precision,
     )
     return trainer, validation_dataset
 
 
-def _build_cli_trainer(config: TinyLLMConfig) -> tuple[Trainer, TokenDataset | None]:
+def _build_cli_trainer(
+    config: TinyLLMConfig,
+    *,
+    precision_policy: PrecisionPolicy | None = None,
+) -> tuple[Trainer, TokenDataset | None]:
     try:
-        return _build_trainer(config)
+        return _build_trainer(config, precision_policy=precision_policy)
     except RuntimeError as error:
         message = str(error)
         if message.startswith(("CUDA training requested", "MPS training requested")):
