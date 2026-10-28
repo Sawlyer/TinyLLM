@@ -31,6 +31,7 @@ from tinyllm.data.prepare import prepare_corpus
 from tinyllm.data.quality import CorpusQualityOptions
 from tinyllm.data.validation import validate_manifest_for_model, validate_tokenizer_for_model
 from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
+from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchmark_report
 from tinyllm.inference.generate import generate
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
@@ -160,6 +161,21 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--quantized", action="store_true")
     generate_parser.add_argument("--no-cache", action="store_true")
     generate_parser.set_defaults(handler=_generate_command)
+
+    inference_benchmark = commands.add_parser(
+        "benchmark-inference", help="compare cached and uncached autoregressive generation"
+    )
+    _add_config_arguments(inference_benchmark, default=None)
+    inference_benchmark.add_argument("--checkpoint", type=Path, required=True)
+    inference_benchmark.add_argument("--prompt", required=True)
+    inference_benchmark.add_argument("--max-new-tokens", type=int, default=64)
+    inference_benchmark.add_argument("--warmup-runs", type=int, default=2)
+    inference_benchmark.add_argument("--measured-runs", type=int, default=5)
+    inference_benchmark.add_argument("--seed", type=int)
+    inference_benchmark.add_argument("--device")
+    inference_benchmark.add_argument("--output", type=Path)
+    inference_benchmark.add_argument("--overwrite", action="store_true")
+    inference_benchmark.set_defaults(handler=_benchmark_inference_command)
 
     interactive_parser = commands.add_parser(
         "interactive", help="try independent prompts in a local terminal session"
@@ -629,6 +645,63 @@ def _evaluate_command(args: argparse.Namespace) -> None:
             sort_keys=True,
         )
     )
+
+
+def _benchmark_inference_command(args: argparse.Namespace) -> None:
+    config = _config_for_checkpoint(args.checkpoint, args.config, args.overrides)
+    device = _resolve_inference_device(args.device or config.training.device)
+    if args.output is not None:
+        _require_writable_output(
+            args.output, overwrite=args.overwrite, label="inference benchmark report"
+        )
+
+    checkpoint = load_model_checkpoint(args.checkpoint, device=device)
+    model = checkpoint.model
+    model_config = ModelConfig.model_validate(checkpoint.identity.model_config)
+    _require_model_config_match(model_config.model_dump(mode="json"), config.model)
+    if sha256_file(config.tokenizer.path) != checkpoint.identity.tokenizer_sha256:
+        raise ValueError("tokenizer checksum differs from checkpoint identity")
+    tokenizer = _load_tokenizer(config.tokenizer.path)
+    validate_tokenizer_for_model(tokenizer, model_config)
+    prompt_ids = tokenizer.encode(args.prompt).ids
+    if not prompt_ids:
+        raise ValueError("benchmark prompt produced no tokens")
+    if min(prompt_ids) < 0 or max(prompt_ids) >= model_config.vocab_size:
+        raise ValueError("benchmark prompt contains token IDs outside model vocab_size")
+    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+
+    generation_values = config.generation.model_dump()
+    generation_values.update(
+        {
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": 0.0,
+            "top_k": None,
+            "top_p": 1.0,
+            "repetition_penalty": 1.0,
+            "seed": config.generation.seed if args.seed is None else args.seed,
+            "eos_token_id": None,
+            "stop_token_sequences": [],
+        }
+    )
+    generation = GenerationConfig.model_validate(generation_values)
+    report = benchmark_generation_cache(
+        model,
+        input_ids,
+        generation,
+        warmup_runs=args.warmup_runs,
+        measured_runs=args.measured_runs,
+    )
+    report["checkpoint"] = str(args.checkpoint)
+    report["prompt"] = args.prompt
+    report["seed"] = generation.seed
+    report["cached_speedup"] = (
+        report["modes"]["cached"]["tokens_per_second"]
+        / max(report["modes"]["uncached"]["tokens_per_second"], 1e-12)
+    )
+    if args.output is not None:
+        write_benchmark_report(report, args.output, overwrite=args.overwrite)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
 
 
 def _generate_command(args: argparse.Namespace) -> None:
