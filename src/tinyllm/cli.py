@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import random
+import signal
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,6 +171,7 @@ def _train_command(args: argparse.Namespace) -> None:
     manifest_path, manifest = start_run_manifest(
         config, args, started_at=_utc_timestamp()
     )
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
     status = "failed"
     try:
         trainer, _ = _build_cli_trainer(config)
@@ -196,18 +198,25 @@ def _train_command(args: argparse.Namespace) -> None:
         status = "interrupted"
         raise
     finally:
-        finish_run_manifest(
-            manifest_path,
-            manifest,
-            config,
-            args,
-            status=status,
-            finished_at=_utc_timestamp(),
-        )
+        try:
+            finish_run_manifest(
+                manifest_path,
+                manifest,
+                config,
+                args,
+                status=status,
+                finished_at=_utc_timestamp(),
+            )
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _handle_sigterm(signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt(f"received signal {signum}")
 
 
 def _inspect_data_command(args: argparse.Namespace) -> None:
