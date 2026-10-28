@@ -67,7 +67,7 @@ def test_supervised_dataset_right_pads_without_scoring_padding(tmp_path: Path) -
 
     assert inputs.tolist() == [[1, 3, 0, 0], [1, 3, 2, 4]]
     assert targets.tolist() == [[3, 5, 0, 0], [3, 2, 4, 5]]
-    assert loss_mask.tolist() == [[False, True, False, False], [False, True, True, True]]
+    assert loss_mask.tolist() == [[True, True, False, False], [False, True, True, True]]
 
 
 def test_full_finetuning_updates_weights_and_evaluates_separate_split(tmp_path: Path) -> None:
