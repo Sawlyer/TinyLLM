@@ -108,7 +108,7 @@ class LoadedModelCheckpoint:
     identity: ArtifactIdentity
     step: int
     tokens_processed: int
-    artifact_type: str = INFERENCE_WEIGHTS_TYPE
+    artifact_type: str = TRAINING_CHECKPOINT_TYPE
     format_version: int = CHECKPOINT_FORMAT_VERSION
     created_at_utc: str | None = None
     producer_version: str | None = None
@@ -432,6 +432,10 @@ def _normalize_checkpoint_payload(
             f"checkpoint format_version {format_version} is no longer supported; "
             "convert it with a TinyLLM release that supports this format"
         )
+    missing_metadata = _FORMAT_METADATA_FIELDS - normalized.keys()
+    if missing_metadata:
+        fields = ", ".join(sorted(missing_metadata))
+        raise CheckpointFormatError(f"checkpoint is missing format metadata: {fields}")
     artifact_type = normalized.get("artifact_type")
     if not isinstance(artifact_type, str) or artifact_type not in {
         TRAINING_CHECKPOINT_TYPE,
