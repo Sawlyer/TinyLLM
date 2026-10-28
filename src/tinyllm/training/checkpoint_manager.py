@@ -89,16 +89,27 @@ def plan_checkpoint_retention(
     step_files = [item for item in files if item.step is not None]
     inspections: dict[Path, CheckpointInspection] = {}
     errors: dict[Path, str] = {}
+    mismatched_steps: set[Path] = set()
     for item in step_files:
         try:
-            inspections[item.path] = inspect_checkpoint(item.path)
+            inspection = inspect_checkpoint(item.path)
+            inspections[item.path] = inspection
+            if inspection.step != item.step:
+                mismatched_steps.add(item.path)
+                errors[item.path] = (
+                    f"filename step {item.step} differs from checkpoint step {inspection.step}"
+                )
         except (OSError, RuntimeError, TypeError, ValueError, CheckpointFormatError) as error:
             errors[item.path] = str(error)
 
     valid = [
         item
         for item in step_files
-        if item.path in inspections and inspections[item.path].status == "resumable"
+        if (
+            item.path in inspections
+            and item.path not in mismatched_steps
+            and inspections[item.path].status == "resumable"
+        )
     ]
     if not valid:
         raise ValueError("no valid resumable step checkpoint found; nothing was deleted")
@@ -151,7 +162,9 @@ def plan_checkpoint_retention(
             continue
         inspection = inspections.get(item.path)
         reasons = selected.get(item.path, [])
-        if inspection is not None and inspection.status != "resumable":
+        if item.path in mismatched_steps:
+            reasons = ["checkpoint preserved: filename step mismatch"]
+        elif inspection is not None and inspection.status != "resumable":
             reasons = ["diagnostic checkpoint preserved"]
         decisions.append(
             CheckpointDecision(
