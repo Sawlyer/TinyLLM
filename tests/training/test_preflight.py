@@ -54,11 +54,18 @@ def _tiny_config(tmp_path: Path, *, device: str = "cpu", precision: str = "fp32"
     return TinyLLMConfig.model_validate(raw)
 
 
-def _args(tmp_path: Path, *, overwrite: bool = False) -> SimpleNamespace:
+def _args(
+    tmp_path: Path,
+    *,
+    overwrite: bool = False,
+    resume: Path | None = None,
+    max_steps: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         checkpoint=tmp_path / "checkpoints" / "latest.pt",
-        resume=None,
+        resume=resume,
         overwrite=overwrite,
+        max_steps=max_steps,
     )
 
 
@@ -133,6 +140,59 @@ def test_preflight_reports_insufficient_disk_space(
 
     assert report["status"] == "error"
     assert any(item["field"] == "storage" for item in report["errors"])
+
+
+def test_preflight_rejects_zero_max_steps_instead_of_using_config_default(
+    tmp_path: Path,
+) -> None:
+    config = _tiny_config(tmp_path)
+
+    report = _build_training_preflight_report(
+        config, _args(tmp_path, max_steps=0), require_data=False
+    )
+
+    assert report["status"] == "error"
+    assert any(item["field"] == "training.max_steps" for item in report["errors"])
+
+
+def test_preflight_rejects_corrupt_resume_before_writing_run_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _tiny_config(tmp_path)
+    manifest_path = config.data.output_dir / "manifest.json"
+    manifest_path.parent.mkdir()
+    manifest_path.write_text("{}", encoding="utf-8")
+    resume = tmp_path / "corrupt.pt"
+    resume.write_bytes(b"corrupt")
+    manifest = SimpleNamespace(
+        artifacts={"train": SimpleNamespace(sha256="corpus-hash")},
+        tokenizer_sha256="tokenizer-hash",
+        dataset_name="example",
+        dataset_revision="revision",
+    )
+    train_dataset = SimpleNamespace(
+        sequence_length=8,
+        validate_state_dict=lambda _state: None,
+    )
+    monkeypatch.setattr("tinyllm.cli._validated_manifest", lambda _config: manifest)
+    monkeypatch.setattr(
+        "tinyllm.cli._dataset",
+        lambda _config, _manifest, split, *, required: train_dataset if split == "train" else None,
+    )
+    monkeypatch.setattr(
+        "tinyllm.cli.load_training_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid checkpoint bytes")),
+    )
+
+    report = _build_training_preflight_report(
+        config, _args(tmp_path, resume=resume), require_data=True
+    )
+
+    assert report["status"] == "error"
+    assert any(
+        item["field"] == "resume" and "invalid checkpoint bytes" in item["cause"]
+        for item in report["errors"]
+    )
 
 
 def test_train_preflight_errors_before_creating_run_files(
