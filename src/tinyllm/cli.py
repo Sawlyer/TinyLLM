@@ -805,6 +805,8 @@ def _profile_training_command(args: argparse.Namespace) -> None:
                 "gpu_total_memory_bytes": int(properties.total_memory),
             }
         )
+    effective_training_config = profile_config.training.model_dump(mode="json")
+    effective_training_config["checkpoint_dir"] = "<temporary>"
     report.update(
         {
             "configuration": config.model_dump(mode="json"),
@@ -818,7 +820,7 @@ def _profile_training_command(args: argparse.Namespace) -> None:
                 "sequence_length": profile_config.model.max_seq_len,
                 "optimizer_steps": total_steps,
                 "unmeasured_priming_steps": 1,
-                "training_config": profile_config.training.model_dump(mode="json"),
+                "training_config": effective_training_config,
             },
             "hardware_and_versions": device_info,
             "measurement_setup_seconds": setup_seconds,
