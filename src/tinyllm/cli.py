@@ -823,10 +823,9 @@ def _profile_training_command(args: argparse.Namespace) -> None:
             "hardware_and_versions": device_info,
             "measurement_setup_seconds": setup_seconds,
             "measurement_cost_note": (
-                "CUDA batch timing synchronizes before and after each measured transfer; "
-                "this adds profiler-only overhead. "
-                "Profiled wall time includes profiler overhead; per-step times include "
-                "data transfer. "
+                "CUDA batch timing synchronizes before and after each profiled transfer; "
+                "synchronization and trace export add measurement cost. "
+                "profiled_wall_seconds includes profiling, training, and optional trace export. "
                 "Model and dataset setup are reported separately."
             ),
         }
