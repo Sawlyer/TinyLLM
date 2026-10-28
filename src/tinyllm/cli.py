@@ -183,7 +183,9 @@ def _prepare_command(args: argparse.Namespace) -> None:
 
 def _train_command(args: argparse.Namespace) -> None:
     config = _load_args_config(args)
-    report = _build_training_preflight_report(config, args, require_data=not args.dry_run)
+    report = _build_training_preflight_report(
+        config, args, require_data=not args.dry_run, dry_run=args.dry_run
+    )
     if args.dry_run:
         print(json.dumps(report, sort_keys=True))
         return
@@ -469,6 +471,7 @@ def _build_training_preflight_report(
     args: argparse.Namespace | None = None,
     *,
     require_data: bool,
+    dry_run: bool = False,
 ) -> dict[str, object]:
     args = args or argparse.Namespace(checkpoint=None, resume=None, overwrite=False, max_steps=None)
     errors: list[dict[str, str]] = []
@@ -519,16 +522,19 @@ def _build_training_preflight_report(
                     raise ValueError("FP8 requires torch.compile")
                 if importlib.util.find_spec("torchao") is None:
                     raise ValueError("FP8 requires the optional torchao package")
-                issue(
-                    warnings,
-                    "training.precision",
-                    None,
-                    "FP8 kernel probe deferred to training; dry-run does not compile kernels",
-                    "Run training on target GPU to validate the FP8 kernel and TorchAO conversion.",
-                )
+                if dry_run:
+                    issue(
+                        warnings,
+                        "training.precision",
+                        None,
+                        "FP8 kernel probe deferred; dry-run does not compile kernels",
+                        "Run training on target GPU to validate FP8 kernel and TorchAO conversion.",
+                    )
+                else:
+                    PrecisionPolicy.create(precision, device)
             else:
                 PrecisionPolicy.create(precision, device)
-        except (RuntimeError, ValueError, ImportError) as error:
+        except (RuntimeError, ValueError, ImportError, TinyLLMUserError) as error:
             issue(
                 errors,
                 "training.precision",
@@ -690,52 +696,6 @@ def _build_training_preflight_report(
         "errors": errors,
         "warnings": warnings,
     }
-
-
-def _print_train_dry_run(config: TinyLLMConfig) -> None:
-    manifest_path = _manifest_path(config)
-    expected_steps = config.training.max_steps
-    if manifest_path.is_file():
-        manifest = _validated_manifest(config)
-        dataset_identity = (
-            f"validated manifest {manifest.dataset_name}@{manifest.dataset_revision} "
-            f"fingerprint={manifest.dataset_fingerprint} "
-            f"tokenizer_sha256={manifest.tokenizer_sha256} "
-            f"train_sha256={manifest.artifacts['train'].sha256}"
-        )
-    else:
-        requested_revision = config.data.dataset_revision or "latest resolved by prepare"
-        dataset_identity = (
-            f"validated config {config.data.dataset_name}@{requested_revision}; "
-            "prepared artifacts not present"
-        )
-    total_parameters = count_parameters_for_config(config.model)
-    trainable_parameters = total_parameters
-    effective_sequences = (
-        config.training.micro_batch_size * config.training.gradient_accumulation_steps
-    )
-    effective_tokens = effective_sequences * config.model.max_seq_len
-    if manifest_path.is_file():
-        total_documents = sum(manifest.document_counts.values())
-        expected_steps = math.ceil(
-            total_documents * (1.0 - config.data.validation_fraction) / effective_sequences
-        )
-    device = config.training.device
-    if device == "cuda":
-        device = "cuda (RTX 5080 target; availability not probed during dry-run)"
-    print(f"dataset identity: {dataset_identity}")
-    print(
-        "parameters: "
-        f"{total_parameters:,} total ({total_parameters / 1_000_000:.2f}M), "
-        f"{trainable_parameters:,} trainable"
-    )
-    print(
-        f"effective batch: {effective_sequences} sequences, "
-        f"{effective_tokens:,} tokens per optimizer step"
-    )
-    print(f"expected steps: {expected_steps}")
-    print(f"precision: {config.training.precision.upper()}")
-    print(f"device: {device}")
 
 
 def _safe_perplexity(loss: float) -> float:
