@@ -40,6 +40,7 @@ class ModelConfig(StrictConfig):
     dropout: float = Field(ge=0, lt=1)
     rope_theta: float = Field(gt=0)
     rms_norm_eps: float = Field(gt=0)
+    tie_word_embeddings: bool = True
 
     @model_validator(mode="after")
     def validate_attention_shape(self) -> "ModelConfig":
