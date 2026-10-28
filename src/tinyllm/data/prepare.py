@@ -71,6 +71,10 @@ def prepare_corpus(
             )
         if quality_report_path.exists():
             existing_report = json.loads(quality_report_path.read_text(encoding="utf-8"))
+            if not isinstance(existing_report, dict):
+                raise FileExistsError(
+                    "prepared corpus quality report is invalid; pass overwrite=True"
+                )
             if existing_report.get("filters") != effective_quality_options.to_dict():
                 raise FileExistsError(
                     "prepared corpus uses different quality filters; pass overwrite=True"
@@ -335,4 +339,3 @@ def _promote_transaction(promotions: list[tuple[Path, Path]], transaction_id: st
     finally:
         for backup in backups.values():
             backup.unlink(missing_ok=True)
-
