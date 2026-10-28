@@ -33,10 +33,12 @@ from tinyllm.data.validation import validate_manifest_for_model, validate_tokeni
 from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
 from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchmark_report
 from tinyllm.inference.generate import generate
+from tinyllm.inference.local_llama import load_local_llama
 from tinyllm.inference.onnx import export_onnx_forward
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
 from tinyllm.inference.quantization_eval import (
     compare_quantized_models,
+    write_json_report,
     write_quantization_comparison_report,
 )
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
@@ -189,6 +191,27 @@ def _build_parser() -> argparse.ArgumentParser:
     compare_quantization.add_argument("--overwrite", action="store_true")
     compare_quantization.add_argument("--device")
     compare_quantization.set_defaults(handler=_compare_quantization_command)
+
+    compare_local_llama = commands.add_parser(
+        "compare-local-llama",
+        help="compare a local Llama checkpoint with a TinyLLM checkpoint",
+    )
+    _add_config_arguments(compare_local_llama)
+    compare_local_llama.add_argument("--checkpoint", type=Path, required=True)
+    compare_local_llama.add_argument("--model-dir", type=Path, required=True)
+    local_llama_size = compare_local_llama.add_mutually_exclusive_group()
+    local_llama_size.add_argument("--batches", type=int, default=8)
+    local_llama_size.add_argument("--tokens", type=int)
+    compare_local_llama.add_argument(
+        "--split", choices=("train", "validation"), default="validation"
+    )
+    compare_local_llama.add_argument("--seed", type=int, default=42)
+    compare_local_llama.add_argument("--warmup-runs", type=int, default=1)
+    compare_local_llama.add_argument("--measured-runs", type=int, default=3)
+    compare_local_llama.add_argument("--output", type=Path)
+    compare_local_llama.add_argument("--overwrite", action="store_true")
+    compare_local_llama.add_argument("--device")
+    compare_local_llama.set_defaults(handler=_compare_local_llama_command)
 
     generate_parser = commands.add_parser("generate", help="generate text from a checkpoint")
     _add_config_arguments(generate_parser, default=None)
@@ -934,6 +957,79 @@ def _benchmark_inference_command(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+
+def _compare_local_llama_command(args: argparse.Namespace) -> None:
+    if args.output is not None and args.output.resolve() == args.checkpoint.resolve():
+        raise ValueError("--output cannot replace the reference checkpoint")
+    config = _load_args_config(args)
+    if type(args.seed) is not int:
+        raise ValueError("--seed must be an integer")
+    if args.tokens is not None and (type(args.tokens) is not int or args.tokens <= 0):
+        raise ValueError("--tokens must be a positive integer")
+    if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
+        raise ValueError("--batches must be a positive integer")
+    manifest = _validated_manifest(config, splits={args.split})
+    dataset = _dataset(config, manifest, args.split, required=False)
+    if dataset is None:
+        raise ValueError(f"{args.split} split is too small for configured sequence length")
+    device = _resolve_inference_device(args.device or config.training.device)
+    reference = load_model_checkpoint(args.checkpoint, device=device)
+    external = load_local_llama(args.model_dir, device=device)
+    _require_model_config_match(reference.identity.model_config, config.model)
+    _require_model_config_match(
+        external.model_config.model_dump(mode="json"),
+        config.model,
+    )
+    tokenizer_sha256 = sha256_file(config.tokenizer.path)
+    if reference.identity.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from reference checkpoint identity")
+    if external.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from local Llama tokenizer")
+    weights_path = args.model_dir / "model.safetensors"
+    comparison = compare_quantized_models(
+        reference.model,
+        external.model,
+        dataset,
+        split=args.split,
+        seed=args.seed,
+        batch_size=config.training.micro_batch_size,
+        batches=args.batches if args.tokens is None else None,
+        tokens=args.tokens,
+        reference_checkpoint_sha256=sha256_file(args.checkpoint),
+        quantized_checkpoint_sha256=external.manifest["files"]["model.safetensors"]["sha256"],
+        corpus_sha256=manifest.artifacts[args.split].sha256,
+        reference_size_bytes=args.checkpoint.stat().st_size,
+        quantized_size_bytes=weights_path.stat().st_size,
+        quantized_manifest=external.manifest,
+        device=device,
+        warmup_runs=args.warmup_runs,
+        measured_runs=args.measured_runs,
+    ).to_dict()
+    external_measurement = comparison.pop("quantized")
+    quality = comparison.pop("quality")
+    report = {
+        **comparison,
+        "comparison_type": "tinyllm-vs-local-llama",
+        "external_model": external_measurement,
+        "comparison": quality,
+    }
+    report["external_model"]["source_directory"] = str(args.model_dir.resolve())
+    if args.output is not None:
+        write_json_report(report, args.output, overwrite=args.overwrite)
+    print(
+        json.dumps(
+            {
+                "loss_delta_nats_per_token": report["comparison"][
+                    "loss_delta_nats_per_token"
+                ],
+                "perplexity_ratio": report["comparison"]["perplexity_ratio"],
+                "latency_ratio": report["comparison"]["latency_ratio"],
+                "evaluated_tokens": report["evaluation"]["evaluated_tokens"],
+                "report": str(args.output) if args.output is not None else None,
+            },
+            sort_keys=True,
+        )
+    )
 
 def _compare_quantization_command(args: argparse.Namespace) -> None:
     for artifact in (args.checkpoint, args.quantized):
@@ -1852,7 +1948,11 @@ def _require_model_config_match(
     checkpoint_model_config: Mapping[str, object],
     configured_model: ModelConfig,
 ) -> None:
-    if dict(checkpoint_model_config) != configured_model.model_dump(mode="json"):
+    try:
+        normalized = ModelConfig.model_validate(checkpoint_model_config).model_dump(mode="json")
+    except ValueError as error:
+        raise ValueError("checkpoint model configuration is incompatible with config") from error
+    if normalized != configured_model.model_dump(mode="json"):
         raise ValueError("checkpoint model configuration is incompatible with config")
 
 

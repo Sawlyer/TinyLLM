@@ -37,7 +37,8 @@ class TinyLLM(nn.Module):
         for block in self.blocks:
             initialize_residual_projection(block.attention.out_proj, config.n_layers)
             initialize_residual_projection(block.feed_forward.down_proj, config.n_layers)
-        self.lm_head.weight = self.token_embedding.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.token_embedding.weight
 
     def forward(
         self,
@@ -153,5 +154,7 @@ def count_parameters_for_config(config: ModelConfig) -> int:
     layer_norms = 2 * config.d_model
     per_layer = attention + feed_forward + layer_norms
     embeddings_and_final_norm = config.vocab_size * config.d_model + config.d_model
+    if not config.tie_word_embeddings:
+        embeddings_and_final_norm += config.vocab_size * config.d_model
     return embeddings_and_final_norm + config.n_layers * per_layer
 
