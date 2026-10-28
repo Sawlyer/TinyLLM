@@ -17,9 +17,13 @@ from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from tinyllm.config.schema import TinyLLMConfig
-from tinyllm.data.loader import DeterministicBatchPrefetcher, TokenDataset
+from tinyllm.data.loader import (
+    DeterministicBatchPrefetcher,
+    TokenDataset,
+    build_document_masks,
+)
 from tinyllm.data.validation import validate_dataset_for_model
-from tinyllm.model.transformer import TinyLLM
+from tinyllm.model.transformer import ModelOutput, TinyLLM
 from tinyllm.training import checkpoint as checkpointing
 from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.optim import build_optimizer, cosine_lr
@@ -73,6 +77,11 @@ class Trainer:
         self.model = model.to(self.device)
         self.train_dataset = train_dataset
         self.validation_dataset = validation_dataset
+        self.isolate_documents = config.training.isolate_documents
+        eos_token_id = train_dataset.manifest.special_token_ids.get("<eos>")
+        if self.isolate_documents and type(eos_token_id) is not int:
+            raise ValueError("document isolation requires a configured <eos> token")
+        self.eos_token_id = eos_token_id
         validate_dataset_for_model(train_dataset, config.model)
         if validation_dataset is not None:
             validate_dataset_for_model(validation_dataset, config.model)
@@ -168,7 +177,7 @@ class Trainer:
                             else nullcontext()
                         ):
                             with self.precision.autocast():
-                                output = self._training_model(inputs, targets)
+                                output = self._forward_training_batch(inputs, targets)
                                 loss = output.loss
                         if loss is None:
                             raise RuntimeError("model did not return a training loss")
@@ -416,6 +425,7 @@ class Trainer:
         if dict(model_snapshot) != current_model:
             raise ValueError("checkpoint model configuration is incompatible")
         fields = (
+            "isolate_documents",
             "learning_rate",
             "min_learning_rate",
             "warmup_steps",
@@ -429,7 +439,10 @@ class Trainer:
         )
         current_training = self.config.training.model_dump(mode="json")
         for field in fields:
-            if training_snapshot.get(field) != current_training[field]:
+            snapshot_value = training_snapshot.get(field)
+            if field == "isolate_documents" and field not in training_snapshot:
+                snapshot_value = False
+            if snapshot_value != current_training[field]:
                 raise ValueError(f"checkpoint training {field} is incompatible")
 
     def _validate_cuda_rng_state(self, state: checkpointing.TrainingState) -> None:
@@ -592,6 +605,19 @@ class Trainer:
             raise ValueError("validation dataset must contain at least one window")
         return total_loss / total_examples
 
+    def _forward_training_batch(self, inputs: Tensor, targets: Tensor) -> ModelOutput:
+        if not self.isolate_documents:
+            return self._training_model(inputs, targets)
+        if self.eos_token_id is None:
+            raise RuntimeError("document isolation has no EOS token id")
+        attention_mask, loss_mask = build_document_masks(inputs, self.eos_token_id)
+        return self._training_model(
+            inputs,
+            targets,
+            attention_mask=attention_mask,
+            loss_mask=loss_mask,
+        )
+
     def _loss_for_positions(self, dataset: TokenDataset, positions: Tensor) -> float:
         was_training = self._training_model.training
         self._training_model.eval()
@@ -600,7 +626,7 @@ class Trainer:
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
             with torch.no_grad(), self.precision.autocast():
-                output = self._training_model(inputs, targets)
+                output = self._forward_training_batch(inputs, targets)
             if output.loss is None:
                 raise RuntimeError("model did not return an evaluation loss")
             return float(output.loss.detach())

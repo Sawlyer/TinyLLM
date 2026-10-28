@@ -41,6 +41,7 @@ class GroupedQueryAttention(nn.Module):
         x: Tensor,
         positions: Tensor,
         cache: KVCache | None = None,
+        attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, KVCache | None]:
         if x.ndim != 3 or x.shape[-1] != self.d_model:
             raise ValueError(f"x must have shape [batch, sequence, {self.d_model}]")
@@ -50,6 +51,13 @@ class GroupedQueryAttention(nn.Module):
             raise ValueError("batched positions must match the input batch size")
 
         batch_size, sequence_length, _ = x.shape
+        if attention_mask is not None:
+            if attention_mask.shape != (batch_size, sequence_length, sequence_length):
+                raise ValueError("attention_mask must have shape [batch, sequence, sequence]")
+            if attention_mask.dtype != torch.bool or attention_mask.device != x.device:
+                raise ValueError("attention_mask must be a boolean tensor on the input device")
+            if cache is not None:
+                raise ValueError("document attention masks cannot be combined with KV caches")
 
         # q: [batch, query_heads, sequence, head_dim]
         query = self.q_proj(x).view(batch_size, sequence_length, self.n_heads, self.head_dim)
@@ -91,19 +99,23 @@ class GroupedQueryAttention(nn.Module):
             -1, self.queries_per_kv, -1, -1
         )
 
-        attention_mask = None
+        sdpa_mask = None
+        if attention_mask is not None:
+            sdpa_mask = attention_mask[:, None, None, :, :].expand(
+                batch_size, self.n_kv_heads, 1, sequence_length, sequence_length
+            ).reshape(batch_size * self.n_kv_heads, 1, sequence_length, sequence_length)
         if cache is not None:
             query_positions = cached_length + torch.arange(sequence_length, device=x.device)
             key_positions = torch.arange(key_sequence_length, device=x.device)
-            attention_mask = key_positions[None, :] <= query_positions[:, None]
+            sdpa_mask = key_positions[None, :] <= query_positions[:, None]
 
         attended = F.scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask=attention_mask,
+            attn_mask=sdpa_mask,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=cache is None,
+            is_causal=cache is None and attention_mask is None,
         )
         # [batch, query_heads, sequence, head_dim] -> [batch, sequence, d_model]
         attended = attended.reshape(batch_size, self.n_heads, sequence_length, self.head_dim)

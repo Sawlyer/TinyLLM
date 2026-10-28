@@ -14,6 +14,23 @@ from torch.utils.data import DataLoader, Dataset
 from tinyllm.data.artifacts import CorpusManifest, open_token_artifact
 
 
+def build_document_masks(inputs: Tensor, eos_token_id: int) -> tuple[Tensor, Tensor]:
+    """Build causal attention and target masks that isolate EOS-delimited documents."""
+    if not isinstance(inputs, Tensor) or inputs.ndim != 2:
+        raise ValueError("inputs must have shape [batch, sequence]")
+    if type(eos_token_id) is not int or eos_token_id < 0:
+        raise ValueError("eos_token_id must be a non-negative integer")
+
+    eos = inputs.eq(eos_token_id)
+    eos_int = eos.long()
+    segments = eos_int.cumsum(dim=1) - eos_int
+    same_document = segments.unsqueeze(2).eq(segments.unsqueeze(1))
+    causal = torch.ones(
+        (inputs.shape[1], inputs.shape[1]), dtype=torch.bool, device=inputs.device
+    ).tril()
+    return same_document & causal, ~eos
+
+
 class TokenDataset(Dataset[tuple[Tensor, Tensor]]):
     """Read-only token windows backed by a verified corpus artifact."""
 

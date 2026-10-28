@@ -24,12 +24,15 @@ class TransformerBlock(nn.Module):
         x: Tensor,
         positions: Tensor,
         cache: KVCache | None = None,
+        attention_mask: Tensor | None = None,
     ) -> tuple[Tensor, KVCache | None]:
-        attended, updated_cache = self.attention(
-            self.attention_norm(x),
-            positions,
-            cache,
-        )
+        normalized = self.attention_norm(x)
+        if attention_mask is None:
+            attended, updated_cache = self.attention(normalized, positions, cache)
+        else:
+            attended, updated_cache = self.attention(
+                normalized, positions, cache, attention_mask
+            )
         x = x + attended
         x = x + self.feed_forward(self.feed_forward_norm(x))
         return x, updated_cache

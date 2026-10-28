@@ -44,6 +44,9 @@ class TinyLLM(nn.Module):
         input_ids: Tensor,
         targets: Tensor | None = None,
         caches: list[KVCache] | None = None,
+        *,
+        attention_mask: Tensor | None = None,
+        loss_mask: Tensor | None = None,
     ) -> ModelOutput:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
@@ -54,6 +57,27 @@ class TinyLLM(nn.Module):
             raise ValueError(f"input sequence length must be in [1, {self.config.max_seq_len}]")
         if targets is not None and targets.shape != input_ids.shape:
             raise ValueError("targets must match input_ids shape")
+        if attention_mask is not None:
+            expected_mask_shape = (input_ids.shape[0], sequence_length, sequence_length)
+            if attention_mask.shape != expected_mask_shape or attention_mask.dtype != torch.bool:
+                raise ValueError(
+                    "attention_mask must be boolean with shape [batch, sequence, sequence]"
+                )
+            if attention_mask.device != input_ids.device:
+                raise ValueError("attention_mask must be on the input device")
+            if caches is not None:
+                raise ValueError("attention_mask cannot be combined with KV caches")
+        if loss_mask is not None:
+            if (
+                targets is None
+                or loss_mask.shape != input_ids.shape
+                or loss_mask.dtype != torch.bool
+            ):
+                raise ValueError(
+                    "loss_mask requires targets and must be boolean with input_ids shape"
+                )
+            if loss_mask.device != input_ids.device:
+                raise ValueError("loss_mask must be on the input device")
         if caches is not None and len(caches) != len(self.blocks):
             raise ValueError("caches must contain one cache per layer")
 
@@ -78,7 +102,10 @@ class TinyLLM(nn.Module):
         layer_caches = [None] * len(self.blocks) if caches is None else list(caches)
         updated_caches: list[KVCache] | None = [] if caches is not None else None
         for block, cache in zip(self.blocks, layer_caches, strict=True):
-            hidden, updated_cache = block(hidden, positions, cache)
+            if attention_mask is None:
+                hidden, updated_cache = block(hidden, positions, cache)
+            else:
+                hidden, updated_cache = block(hidden, positions, cache, attention_mask)
             if updated_caches is not None:
                 if updated_cache is None:
                     raise RuntimeError("attention did not return an updated cache")
@@ -87,10 +114,19 @@ class TinyLLM(nn.Module):
         logits = self.lm_head(self.final_norm(hidden))
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                targets.reshape(-1),
-            )
+            if loss_mask is None:
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]),
+                    targets.reshape(-1),
+                )
+            else:
+                token_losses = F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]),
+                    targets.reshape(-1),
+                    reduction="none",
+                ).view_as(targets)
+                weights = loss_mask.to(dtype=token_losses.dtype)
+                loss = (token_losses * weights).sum() / weights.sum().clamp_min(1)
         return ModelOutput(
             logits=logits,
             loss=loss,

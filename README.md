@@ -249,6 +249,14 @@ step numbers remain distinguishable. Steps increase within each session.
   CUDA memory since the last reset. `cuda_free_memory_bytes` and `cuda_total_memory_bytes` record
   free and total CUDA memory at report time; CUDA fields are absent on CPU runs.
 
+### Document isolation
+
+Corpus windows contain no padding: current token utilization is 100%. Packing cannot improve
+that path. Set training.isolate_documents to true when training objective must keep documents
+independent. EOS starts a fresh causal-attention segment; model ignores target crossing from EOS
+into next document. Default remains false for backward compatibility and fast causal attention.
+Explicit masks may change throughput; benchmark on target hardware before enabling.
+
 ### Reproducible evaluation
 
 Evaluation defaults to the validation split, 8 batches, and seed 42. Each batch samples token
