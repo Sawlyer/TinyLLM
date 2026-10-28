@@ -315,6 +315,7 @@ class StreamingCorpusQuality:
                     "64-bit SimHash of character 5-grams and word bigrams; "
                     "eight 8-bit lookup bands; Hamming threshold up to 7"
                 ),
+                "repetition": "longest same-character run and repeated word trigrams",
                 "language_detection": "deterministic English/French/German/Spanish marker heuristic",
                 "language_filter_behavior": (
                     "remove only when expected language differs and confidence meets threshold"
