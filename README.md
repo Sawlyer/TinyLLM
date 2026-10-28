@@ -451,7 +451,7 @@ uv run tinyllm benchmark-precision --config configs/tinyllm.yaml --modes bf16 fp
 ```
 
 Each JSON file records the model and benchmark settings, seed, operating system, processor, Python,
-PyTorch, CUDA runtime, and GPU name, compute capability, and memory when a CUDA device is selected.
+PyTorch, CUDA runtime, optional TorchAO, and GPU name, compute capability, and memory when a CUDA device is selected.
 Keep these reports with the commit and software environment they describe. Results include finite-loss
 status and unsupported/failed reasons; an unavailable kernel is not a zero-speed measurement.
 
