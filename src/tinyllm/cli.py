@@ -51,7 +51,11 @@ from tinyllm.training.checkpoint_manager import (
     plan_checkpoint_retention,
 )
 from tinyllm.training.evaluation import evaluate_model, write_evaluation_report
-from tinyllm.training.metrics import MetricLogger
+from tinyllm.training.finetune import (
+    load_supervised_dataset,
+    run_supervised_finetuning,
+    write_finetuning_manifest,
+)from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.precision import PrecisionPolicy
 from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
 from tinyllm.training.trainer import Trainer, _resolve_device
@@ -131,6 +135,20 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--overwrite", action="store_true")
     train.add_argument("--dry-run", action="store_true")
     train.set_defaults(handler=_train_command)
+
+    finetune = commands.add_parser(
+        "finetune", help="full fine-tune a checkpoint on prompt/completion JSONL data"
+    )
+    _add_config_arguments(finetune, default=None)
+    finetune.add_argument("--checkpoint", type=Path, required=True)
+    finetune.add_argument("--train-data", type=Path, required=True)
+    finetune.add_argument("--validation-data", type=Path, required=True)
+    finetune.add_argument("--output", type=Path, required=True)
+    finetune.add_argument("--max-steps", type=int)
+    finetune.add_argument("--seed", type=int)
+    finetune.add_argument("--device")
+    finetune.add_argument("--overwrite", action="store_true")
+    finetune.set_defaults(handler=_finetune_command)
 
     evaluate = commands.add_parser("evaluate", help="evaluate a training checkpoint")
     _add_config_arguments(evaluate)
@@ -578,6 +596,146 @@ def _audit_artifacts_command(args: argparse.Namespace) -> None:
     print(json.dumps(report, sort_keys=True))
     if report["status"] == "error":
         raise TinyLLMUserError("artifact audit found errors")
+
+
+def _finetune_command(args: argparse.Namespace) -> None:
+    if args.checkpoint.resolve() == args.output.resolve():
+        raise ValueError("--output cannot replace the base checkpoint")
+    sidecar = args.output.with_suffix(".finetune.json")
+    _require_writable_output(args.output, overwrite=args.overwrite, label="fine-tuned checkpoint")
+    _require_writable_output(sidecar, overwrite=args.overwrite, label="fine-tuning manifest")
+
+    config = _config_for_checkpoint(args.checkpoint, args.config, args.overrides)
+    training_updates: dict[str, object] = {}
+    if args.max_steps is not None:
+        training_updates["max_steps"] = args.max_steps
+    if args.seed is not None:
+        training_updates["seed"] = args.seed
+    if args.device is not None:
+        training_updates["device"] = args.device
+    training_config = config.training.model_copy(update=training_updates)
+    if type(training_config.max_steps) is not int or training_config.max_steps <= 0:
+        raise ValueError("fine-tuning max_steps must be positive")
+    if training_config.warmup_steps >= training_config.max_steps:
+        raise ValueError("fine-tuning warmup_steps must be less than max_steps")
+
+    device = _resolve_inference_device(training_config.device)
+    training_config = training_config.model_copy(update={"device": str(device)})
+    checkpoint = load_model_checkpoint(args.checkpoint, device=device)
+    model_config = ModelConfig.model_validate(checkpoint.identity.model_config)
+    _require_model_config_match(model_config.model_dump(mode="json"), config.model)
+    tokenizer_path = config.tokenizer.path
+    if sha256_file(tokenizer_path) != checkpoint.identity.tokenizer_sha256:
+        raise ValueError("tokenizer checksum differs from checkpoint identity")
+    tokenizer = _load_tokenizer(tokenizer_path)
+    validate_tokenizer_for_model(tokenizer, model_config)
+    pad_token_id = tokenizer.token_to_id("<pad>")
+    eos_token_id = tokenizer.token_to_id("<eos>")
+    if type(pad_token_id) is not int or type(eos_token_id) is not int:
+        raise ValueError("fine-tuning requires <pad> and <eos> tokens in the tokenizer")
+
+    train_dataset = load_supervised_dataset(
+        args.train_data,
+        tokenizer,
+        max_seq_len=model_config.max_seq_len,
+        pad_token_id=pad_token_id,
+        eos_token_id=eos_token_id,
+        seed=training_config.seed,
+    )
+    validation_dataset = load_supervised_dataset(
+        args.validation_data,
+        tokenizer,
+        max_seq_len=model_config.max_seq_len,
+        pad_token_id=pad_token_id,
+        eos_token_id=eos_token_id,
+        seed=training_config.seed + 1,
+    )
+    for dataset in (train_dataset, validation_dataset):
+        if any(
+            min(example.token_ids) < 0 or max(example.token_ids) >= model_config.vocab_size
+            for example in dataset.examples
+        ):
+            raise ValueError("fine-tuning data contains token IDs outside model vocab_size")
+
+    result = run_supervised_finetuning(
+        checkpoint.model,
+        train_dataset,
+        validation_dataset,
+        training_config,
+    )
+    save_model_checkpoint(
+        args.output,
+        result.model,
+        config_snapshot=checkpoint.config_snapshot,
+        identity=checkpoint.identity,
+        step=checkpoint.step + result.steps,
+        tokens_processed=checkpoint.tokens_processed + result.training_tokens,
+        overwrite=args.overwrite,
+    )
+    environment: dict[str, object] = {
+        "device": str(device),
+        "python_version": platform.python_version(),
+        "torch_version": str(torch.__version__),
+        "cuda_runtime_version": torch.version.cuda,
+    }
+    if device.type == "cuda":
+        properties = torch.cuda.get_device_properties(device)
+        environment.update(
+            {
+                "gpu_name": torch.cuda.get_device_name(device),
+                "gpu_capability": list(torch.cuda.get_device_capability(device)),
+                "gpu_total_memory_bytes": int(properties.total_memory),
+            }
+        )
+    metadata = {
+        "format_version": 1,
+        "task": "supervised_finetuning",
+        "base_checkpoint": str(args.checkpoint),
+        "base_checkpoint_sha256": sha256_file(args.checkpoint),
+        "output_checkpoint": str(args.output),
+        "tokenizer_sha256": checkpoint.identity.tokenizer_sha256,
+        "data": {
+            "format": "jsonl_prompt_completion",
+            "prompt_loss_masked": True,
+            "eos_scored": True,
+            "right_padding": True,
+            "cross_example_packing": False,
+            "train_sha256": sha256_file(args.train_data),
+            "validation_sha256": sha256_file(args.validation_data),
+            "train_examples": len(train_dataset),
+            "validation_examples": len(validation_dataset),
+        },
+        "model_config": model_config.model_dump(mode="json"),
+        "training_config": training_config.model_dump(mode="json"),
+        "environment": environment,
+        "metrics": {
+            "steps": result.steps,
+            "training_tokens": result.training_tokens,
+            "scored_tokens": result.scored_tokens,
+            "training_loss": result.training_loss,
+            "validation_loss": result.validation_loss,
+        },
+        "limitations": [
+            "full-parameter fine-tuning; no LoRA",
+            "single-turn prompt/completion records",
+            "no automatic safety or factuality guarantee",
+        ],
+    }
+    write_finetuning_manifest(sidecar, metadata, overwrite=args.overwrite)
+    print(
+        json.dumps(
+            {
+                "checkpoint": str(args.output),
+                "manifest": str(sidecar),
+                "steps": result.steps,
+                "training_loss": result.training_loss,
+                "validation_loss": result.validation_loss,
+                "training_tokens": result.training_tokens,
+                "scored_tokens": result.scored_tokens,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _evaluate_command(args: argparse.Namespace) -> None:
