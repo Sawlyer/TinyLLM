@@ -11,6 +11,11 @@ import torch
 from torch import Tensor
 
 
+from torch.utils.data import DataLoader, Dataset
+
+from tinyllm.data.artifacts import CorpusManifest, open_token_artifact
+
+
 def build_document_masks(inputs: Tensor, eos_token_id: int) -> tuple[Tensor, Tensor]:
     """Build causal attention and target masks that isolate EOS-delimited documents."""
     if not isinstance(inputs, Tensor) or inputs.ndim != 2:
@@ -26,9 +31,6 @@ def build_document_masks(inputs: Tensor, eos_token_id: int) -> tuple[Tensor, Ten
         (inputs.shape[1], inputs.shape[1]), dtype=torch.bool, device=inputs.device
     ).tril()
     return same_document & causal, ~eos
-from torch.utils.data import DataLoader, Dataset
-
-from tinyllm.data.artifacts import CorpusManifest, open_token_artifact
 
 
 class TokenDataset(Dataset[tuple[Tensor, Tensor]]):
