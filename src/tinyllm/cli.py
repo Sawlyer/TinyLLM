@@ -35,6 +35,10 @@ from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchm
 from tinyllm.inference.generate import generate
 from tinyllm.inference.onnx import export_onnx_forward
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
+from tinyllm.inference.quantization_eval import (
+    compare_quantized_models,
+    write_quantization_comparison_report,
+)
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
 from tinyllm.training.checkpoint import (
@@ -165,6 +169,27 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--device")
     evaluate.set_defaults(handler=_evaluate_command)
 
+    compare_quantization = commands.add_parser(
+        "compare-quantization",
+        help="compare quantized model quality and evaluation cost with its source",
+    )
+    _add_config_arguments(compare_quantization)
+    compare_quantization.add_argument("--checkpoint", type=Path, required=True)
+    compare_quantization.add_argument("--quantized", type=Path, required=True)
+    comparison_size = compare_quantization.add_mutually_exclusive_group()
+    comparison_size.add_argument("--batches", type=int, default=8)
+    comparison_size.add_argument("--tokens", type=int)
+    compare_quantization.add_argument(
+        "--split", choices=("train", "validation"), default="validation"
+    )
+    compare_quantization.add_argument("--seed", type=int, default=42)
+    compare_quantization.add_argument("--warmup-runs", type=int, default=1)
+    compare_quantization.add_argument("--measured-runs", type=int, default=3)
+    compare_quantization.add_argument("--output", type=Path)
+    compare_quantization.add_argument("--overwrite", action="store_true")
+    compare_quantization.add_argument("--device")
+    compare_quantization.set_defaults(handler=_compare_quantization_command)
+
     generate_parser = commands.add_parser("generate", help="generate text from a checkpoint")
     _add_config_arguments(generate_parser, default=None)
     generate_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -197,8 +222,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inference_benchmark.add_argument("--overwrite", action="store_true")
     inference_benchmark.set_defaults(handler=_benchmark_inference_command)
 
-    interactive_parser = commands.add_parser(
-        "interactive", help="try independent prompts in a local terminal session"
+    interactive_parser = commands.add_parser(        "interactive", help="try independent prompts in a local terminal session"
     )
     _add_config_arguments(interactive_parser, default=None)
     interactive_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -397,8 +421,7 @@ def _export_weights_command(args: argparse.Namespace) -> None:
 def _checkpoint_inspect_command(args: argparse.Namespace) -> None:
     info = inspect_checkpoint(args.checkpoint)
     print(
-        json.dumps(
-            {
+        json.dumps(            {
                 "path": str(info.path),
                 "size_bytes": info.size_bytes,
                 "step": info.step,
@@ -597,8 +620,7 @@ def _inspect_data_command(args: argparse.Namespace) -> None:
             {
                 "checksum_validated": True,
                 "dataset": manifest.dataset_name,
-                "dataset_revision": manifest.dataset_revision,
-                "dataset_fingerprint": manifest.dataset_fingerprint,
+                "dataset_revision": manifest.dataset_revision,                "dataset_fingerprint": manifest.dataset_fingerprint,
                 "documents": manifest.document_counts,
                 "tokenizer_sha256": manifest.tokenizer_sha256,
                 "artifacts": {
@@ -797,8 +819,7 @@ def _evaluate_command(args: argparse.Namespace) -> None:
     if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
         raise ValueError("--batches must be a positive integer")
     manifest = _validated_manifest(config, splits={args.split})
-    dataset = _dataset(config, manifest, args.split, required=False)
-    if dataset is None:
+    dataset = _dataset(config, manifest, args.split, required=False)    if dataset is None:
         raise ValueError(f"{args.split} split is too small for configured sequence length")
     device = _resolve_inference_device(args.device or config.training.device)
     loaded = load_model_checkpoint(args.checkpoint, device=device)
@@ -910,6 +931,74 @@ def _benchmark_inference_command(args: argparse.Namespace) -> None:
 
 
 
+def _compare_quantization_command(args: argparse.Namespace) -> None:
+    for artifact in (args.checkpoint, args.quantized):
+        if args.output is not None and args.output.resolve() == artifact.resolve():
+            raise ValueError("--output cannot replace either checkpoint")
+    config = _load_args_config(args)
+    if type(args.seed) is not int:
+        raise ValueError("--seed must be an integer")
+    if args.tokens is not None and (type(args.tokens) is not int or args.tokens <= 0):
+        raise ValueError("--tokens must be a positive integer")
+    if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
+        raise ValueError("--batches must be a positive integer")
+    manifest = _validated_manifest(config, splits={args.split})
+    dataset = _dataset(config, manifest, args.split, required=False)
+    if dataset is None:
+        raise ValueError(f"{args.split} split is too small for configured sequence length")
+    device = _resolve_inference_device(args.device or config.training.device)
+    reference = load_model_checkpoint(args.checkpoint, device=device)
+    quantized = load_quantized_checkpoint(args.quantized, device=device)
+    _require_model_config_match(reference.identity.model_config, config.model)
+    _require_model_config_match(
+        quantized.model_config.model_dump(mode="json"),
+        config.model,
+    )
+    tokenizer_sha256 = sha256_file(config.tokenizer.path)
+    if reference.identity.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from source checkpoint identity")
+    if quantized.manifest.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from quantized export identity")
+    report = compare_quantized_models(
+        reference.model,
+        quantized.model,
+        dataset,
+        split=args.split,
+        seed=args.seed,
+        batch_size=config.training.micro_batch_size,
+        batches=args.batches if args.tokens is None else None,
+        tokens=args.tokens,
+        reference_checkpoint_sha256=sha256_file(args.checkpoint),
+        quantized_checkpoint_sha256=sha256_file(args.quantized),
+        corpus_sha256=manifest.artifacts[args.split].sha256,
+        reference_size_bytes=args.checkpoint.stat().st_size,
+        quantized_size_bytes=args.quantized.stat().st_size,
+        quantized_manifest=quantized.manifest.to_dict(),
+        device=device,
+        warmup_runs=args.warmup_runs,
+        measured_runs=args.measured_runs,
+    )
+    if args.output is not None:
+        write_quantization_comparison_report(
+            report,
+            args.output,
+            overwrite=args.overwrite,
+        )
+    print(
+        json.dumps(
+            {
+                "loss_delta_nats_per_token": report.quality["loss_delta_nats_per_token"],
+                "perplexity_ratio": report.quality["perplexity_ratio"],
+                "latency_ratio": report.quality["latency_ratio"],
+                "artifact_size_ratio": report.quality["artifact_size_ratio"],
+                "evaluated_tokens": report.evaluation["evaluated_tokens"],
+                "report": str(args.output) if args.output is not None else None,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _generate_command(args: argparse.Namespace) -> None:
     if args.quantized:
         if args.config is None:
@@ -997,8 +1086,7 @@ def _generate_command(args: argparse.Namespace) -> None:
             (
                 len(stop_sequence)
                 for stop_sequence in stop_sequences
-                if len(new_ids) >= len(stop_sequence)
-                and new_ids[-len(stop_sequence) :] == stop_sequence
+                if len(new_ids) >= len(stop_sequence)                and new_ids[-len(stop_sequence) :] == stop_sequence
             ),
             default=0,
         )
@@ -1197,8 +1285,7 @@ def _profile_training_command(args: argparse.Namespace) -> None:
 
 
 def _benchmark_precision_command(args: argparse.Namespace) -> None:
-    config = _load_args_config(args)
-    output = args.output or config.logging.run_dir / "precision-benchmark.json"
+    config = _load_args_config(args)    output = args.output or config.logging.run_dir / "precision-benchmark.json"
     batch_size = config.training.micro_batch_size if args.batch_size is None else args.batch_size
     sequence_length = (
         config.model.max_seq_len if args.sequence_length is None else args.sequence_length
@@ -1397,8 +1484,7 @@ def _build_training_preflight_report(
             )
             state = load_training_checkpoint(Path(args.resume), expected_identity)
             _validate_resume_preflight(
-                config,
-                train_dataset,
+                config,                train_dataset,
                 state,
                 max_steps=steps,
                 device=device,
@@ -1597,8 +1683,7 @@ def _validate_resume_preflight(
     if type(available) is not bool or type(device_count) is not int:
         raise ValueError("checkpoint CUDA RNG metadata is invalid")
     if available:
-        if (
-            device_count <= 0
+        if (            device_count <= 0
             or type(active_device) is not int
             or not 0 <= active_device < device_count
             or len(state.cuda_rng_states) != device_count
@@ -1797,11 +1882,9 @@ def _local_documents(dataset_name: str) -> Iterable[str] | None:
                 text = line.strip()
                 if text:
                     yield text
-
     return read_lines()
 
 
 def _require_writable_output(path: Path, *, overwrite: bool, label: str) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
-
