@@ -12,7 +12,6 @@ from typing import Any, Protocol
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from tinyllm.config.schema import TrainingConfig
 from tinyllm.model.transformer import TinyLLM
