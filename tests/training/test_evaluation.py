@@ -28,6 +28,11 @@ class MeanTargetModel(torch.nn.Module):
         return SimpleNamespace(loss=targets.float().mean())
 
 
+class HighLossModel(torch.nn.Module):
+    def forward(self, _inputs, _targets):
+        return SimpleNamespace(loss=torch.tensor(81.0))
+
+
 def test_evaluation_uses_seeded_positions_and_reports_batch_protocol():
     model = MeanTargetModel()
     model.train()
@@ -109,6 +114,20 @@ def test_evaluation_amount_must_select_positive_batches_or_tokens():
         evaluate_model(**arguments, batches=1, tokens=7)
     with pytest.raises(ValueError, match="positive"):
         evaluate_model(**arguments, batches=0)
+
+
+def test_perplexity_limit_is_explicitly_reported():
+    report = evaluate_model(
+        HighLossModel(),
+        PositionDataset(),
+        split="validation",
+        seed=1,
+        batch_size=1,
+        batches=1,
+    )
+
+    assert report.perplexity == pytest.approx(math.exp(80.0))
+    assert report.perplexity_saturated
 
 
 def test_evaluation_rejects_mismatched_dataset_split():
