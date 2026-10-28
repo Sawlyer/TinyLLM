@@ -30,7 +30,14 @@ from tinyllm.inference.generate import generate
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
-from tinyllm.training.checkpoint import load_model_checkpoint
+from tinyllm.training.checkpoint import (
+    ArtifactIdentity,
+    TrainingState,
+    load_model_checkpoint,
+)
+from tinyllm.training.checkpoint import (
+    load_checkpoint as load_training_checkpoint,
+)
 from tinyllm.training.evaluation import evaluate_model, write_evaluation_report
 from tinyllm.training.metrics import MetricLogger
 from tinyllm.training.precision import PrecisionPolicy
@@ -554,10 +561,11 @@ def _build_training_preflight_report(
 
     manifest_path = _manifest_path(config)
     manifest: CorpusManifest | None = None
+    train_dataset: TokenDataset | None = None
     if manifest_path.is_file():
         try:
             manifest = _validated_manifest(config)
-            _dataset(config, manifest, "train", required=True)
+            train_dataset = _dataset(config, manifest, "train", required=True)
             _dataset(config, manifest, "validation", required=False)
         except (OSError, ValueError, KeyError) as error:
             issue(
@@ -567,6 +575,7 @@ def _build_training_preflight_report(
                 str(error),
                 "Run `tinyllm inspect-data` and prepare compatible corpus artifacts.",
             )
+            train_dataset = None
     elif require_data:
         issue(
             errors,
@@ -585,6 +594,16 @@ def _build_training_preflight_report(
         )
 
     checkpoint = args.checkpoint or config.training.checkpoint_dir / "latest.pt"
+    requested_steps = getattr(args, "max_steps", None)
+    steps = config.training.max_steps if requested_steps is None else requested_steps
+    if type(steps) is not int or steps <= 0 or steps > config.training.max_steps:
+        issue(
+            errors,
+            "training.max_steps",
+            None,
+            f"requested steps {steps!r} must be between 1 and {config.training.max_steps}",
+            "Choose --max-steps within the configured training limit.",
+        )
     if args.resume is not None and not Path(args.resume).is_file():
         issue(
             errors,
@@ -593,6 +612,24 @@ def _build_training_preflight_report(
             "resume checkpoint does not exist",
             "Provide an existing compatible checkpoint or omit --resume.",
         )
+    elif args.resume is not None and train_dataset is not None and manifest is not None:
+        try:
+            train_artifact = manifest.artifacts["train"]
+            expected_identity = ArtifactIdentity(
+                model_config=config.model.model_dump(mode="json"),
+                tokenizer_sha256=manifest.tokenizer_sha256,
+                corpus_sha256=train_artifact.sha256,
+            )
+            state = load_training_checkpoint(Path(args.resume), expected_identity)
+            _validate_resume_preflight(config, train_dataset, state, max_steps=steps)
+        except (OSError, ValueError, TypeError, TinyLLMUserError) as error:
+            issue(
+                errors,
+                "resume",
+                Path(args.resume),
+                str(error),
+                "Use a readable checkpoint matching model, data, tokenizer, and training settings.",
+            )
     if checkpoint.exists() and not args.overwrite:
         issue(
             errors,
@@ -600,16 +637,6 @@ def _build_training_preflight_report(
             checkpoint,
             "output checkpoint already exists",
             "Choose another --checkpoint path or pass --overwrite.",
-        )
-
-    steps = getattr(args, "max_steps", None) or config.training.max_steps
-    if type(steps) is not int or steps <= 0 or steps > config.training.max_steps:
-        issue(
-            errors,
-            "training.max_steps",
-            None,
-            f"requested steps {steps!r} must be between 1 and {config.training.max_steps}",
-            "Choose --max-steps within the configured training limit.",
         )
 
     parameters = count_parameters_for_config(config.model)
@@ -719,6 +746,91 @@ def _build_training_preflight_report(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def _validate_resume_preflight(
+    config: TinyLLMConfig,
+    train_dataset: TokenDataset,
+    state: TrainingState,
+    *,
+    max_steps: int,
+) -> None:
+    snapshot = state.config_snapshot
+    model_snapshot = snapshot.get("model")
+    training_snapshot = snapshot.get("training")
+    if not isinstance(model_snapshot, Mapping) or not isinstance(training_snapshot, Mapping):
+        raise ValueError("checkpoint configuration snapshot is invalid")
+    if dict(model_snapshot) != config.model.model_dump(mode="json"):
+        raise ValueError("checkpoint model configuration is incompatible")
+    fields = (
+        "learning_rate",
+        "min_learning_rate",
+        "warmup_steps",
+        "max_steps",
+        "micro_batch_size",
+        "gradient_accumulation_steps",
+        "precision",
+        "weight_decay",
+        "max_grad_norm",
+        "compile",
+    )
+    current_training = config.training.model_dump(mode="json")
+    for field in fields:
+        if training_snapshot.get(field) != current_training[field]:
+            raise ValueError(f"checkpoint training {field} is incompatible")
+
+    scheduler = dict(state.scheduler_state)
+    if set(scheduler) != {"last_step", "total_steps"} or scheduler.get("last_step") != state.step:
+        raise ValueError("checkpoint scheduler state is inconsistent")
+    if scheduler.get("total_steps") != config.training.max_steps:
+        raise ValueError("checkpoint scheduler configuration is incompatible")
+    if state.step > config.training.max_steps:
+        raise ValueError("checkpoint step exceeds configured total steps")
+    if max_steps <= state.step:
+        raise ValueError("max_steps must be greater than the current checkpoint step")
+    tokens_per_step = (
+        config.training.micro_batch_size
+        * train_dataset.sequence_length
+        * config.training.gradient_accumulation_steps
+    )
+    if state.tokens_processed != state.step * tokens_per_step:
+        raise ValueError("checkpoint token count is inconsistent with step")
+    train_dataset.validate_state_dict(state.loader_rng_state)
+    random.Random().setstate(state.python_rng_state)
+    torch.Generator(device="cpu").set_state(state.torch_rng_state)
+
+    metadata = dict(state.cuda_rng_metadata)
+    required = {
+        "available",
+        "device_count",
+        "active_device",
+        "training_device_type",
+        "training_device_index",
+    }
+    if set(metadata) != required:
+        raise ValueError("checkpoint CUDA RNG metadata has invalid fields")
+    available = metadata["available"]
+    device_count = metadata["device_count"]
+    active_device = metadata["active_device"]
+    if type(available) is not bool or type(device_count) is not int:
+        raise ValueError("checkpoint CUDA RNG metadata is invalid")
+    if available:
+        if (
+            device_count <= 0
+            or type(active_device) is not int
+            or not 0 <= active_device < device_count
+            or len(state.cuda_rng_states) != device_count
+        ):
+            raise ValueError("checkpoint CUDA RNG metadata is inconsistent")
+    elif device_count != 0 or active_device is not None or state.cuda_rng_states:
+        raise ValueError("checkpoint CUDA RNG metadata is inconsistent")
+    for cuda_state in state.cuda_rng_states:
+        if (
+            cuda_state.device.type != "cpu"
+            or cuda_state.dtype != torch.uint8
+            or cuda_state.numel() == 0
+        ):
+            raise ValueError("checkpoint CUDA RNG state is invalid")
 
 
 def _safe_perplexity(loss: float) -> float:
