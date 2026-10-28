@@ -26,6 +26,7 @@ class CorpusQualityOptions:
     min_characters: int | None = None
     max_characters: int | None = None
     max_repeated_character_ratio: float | None = None
+    max_repeated_ngram_ratio: float | None = None
     expected_language: str | None = None
     minimum_language_confidence: float = 0.65
     deduplicate_exact: bool = False
@@ -47,6 +48,10 @@ class CorpusQualityOptions:
             0.0 <= self.max_repeated_character_ratio <= 1.0
         ):
             raise ValueError("max_repeated_character_ratio must be between 0 and 1")
+        if self.max_repeated_ngram_ratio is not None and not (
+            0.0 <= self.max_repeated_ngram_ratio <= 1.0
+        ):
+            raise ValueError("max_repeated_ngram_ratio must be between 0 and 1")
         if self.expected_language not in {None, *_LANGUAGE_MARKERS}:
             raise ValueError("expected_language must be one of de, en, es, fr")
         if not 0.0 <= self.minimum_language_confidence <= 1.0:
@@ -59,6 +64,7 @@ class CorpusQualityOptions:
             "min_characters": self.min_characters,
             "max_characters": self.max_characters,
             "max_repeated_character_ratio": self.max_repeated_character_ratio,
+            "max_repeated_ngram_ratio": self.max_repeated_ngram_ratio,
             "expected_language": self.expected_language,
             "minimum_language_confidence": self.minimum_language_confidence,
             "deduplicate_exact": self.deduplicate_exact,
@@ -164,6 +170,7 @@ class StreamingCorpusQuality:
         self.source_records += 1
         stats = self.splits[split]
         repeated_ratio = _max_repeated_character_ratio(text)
+        repeated_ngram_ratio = _repeated_word_ngram_ratio(text)
         language, confidence = detect_language(text)
         stats.observe_before(len(text), language)
 
@@ -204,6 +211,7 @@ class StreamingCorpusQuality:
         reasons = self._filter_reasons(
             text=text,
             repeated_ratio=repeated_ratio,
+            repeated_ngram_ratio=repeated_ngram_ratio,
             language=language,
             language_confidence=confidence,
             exact_duplicate=exact_duplicate,
@@ -225,6 +233,7 @@ class StreamingCorpusQuality:
         *,
         text: str,
         repeated_ratio: float,
+        repeated_ngram_ratio: float,
         language: str,
         language_confidence: float,
         exact_duplicate: bool,
@@ -240,6 +249,11 @@ class StreamingCorpusQuality:
             and repeated_ratio > self.options.max_repeated_character_ratio
         ):
             reasons.append("repeated_character_run")
+        if (
+            self.options.max_repeated_ngram_ratio is not None
+            and repeated_ngram_ratio > self.options.max_repeated_ngram_ratio
+        ):
+            reasons.append("repeated_word_sequences")
         if (
             self.options.expected_language is not None
             and language_confidence >= self.options.minimum_language_confidence
@@ -343,6 +357,15 @@ def _max_repeated_character_ratio(text: str) -> float:
         longest = max(longest, run)
         previous = character
     return longest / len(text)
+
+
+def _repeated_word_ngram_ratio(text: str) -> float:
+    words = _WORD_PATTERN.findall(text.casefold())
+    if len(words) < 4:
+        return 0.0
+    ngrams = Counter(tuple(words[index : index + 3]) for index in range(len(words) - 2))
+    repeated_words = sum((frequency - 1) * 3 for frequency in ngrams.values() if frequency > 1)
+    return min(1.0, repeated_words / len(words))
 
 
 def _simhash(text: str) -> int:
