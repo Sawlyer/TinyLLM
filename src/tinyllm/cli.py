@@ -35,6 +35,10 @@ from tinyllm.inference.benchmark import benchmark_generation_cache, write_benchm
 from tinyllm.inference.generate import generate
 from tinyllm.inference.onnx import export_onnx_forward
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
+from tinyllm.inference.quantization_eval import (
+    compare_quantized_models,
+    write_quantization_comparison_report,
+)
 from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
 from tinyllm.training.checkpoint import (
@@ -164,6 +168,27 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--overwrite", action="store_true")
     evaluate.add_argument("--device")
     evaluate.set_defaults(handler=_evaluate_command)
+
+    compare_quantization = commands.add_parser(
+        "compare-quantization",
+        help="compare quantized model quality and evaluation cost with its source",
+    )
+    _add_config_arguments(compare_quantization)
+    compare_quantization.add_argument("--checkpoint", type=Path, required=True)
+    compare_quantization.add_argument("--quantized", type=Path, required=True)
+    comparison_size = compare_quantization.add_mutually_exclusive_group()
+    comparison_size.add_argument("--batches", type=int, default=8)
+    comparison_size.add_argument("--tokens", type=int)
+    compare_quantization.add_argument(
+        "--split", choices=("train", "validation"), default="validation"
+    )
+    compare_quantization.add_argument("--seed", type=int, default=42)
+    compare_quantization.add_argument("--warmup-runs", type=int, default=1)
+    compare_quantization.add_argument("--measured-runs", type=int, default=3)
+    compare_quantization.add_argument("--output", type=Path)
+    compare_quantization.add_argument("--overwrite", action="store_true")
+    compare_quantization.add_argument("--device")
+    compare_quantization.set_defaults(handler=_compare_quantization_command)
 
     generate_parser = commands.add_parser("generate", help="generate text from a checkpoint")
     _add_config_arguments(generate_parser, default=None)
@@ -908,6 +933,74 @@ def _benchmark_inference_command(args: argparse.Namespace) -> None:
         write_benchmark_report(report, args.output, overwrite=args.overwrite)
     print(json.dumps(report, indent=2, sort_keys=True))
 
+
+
+def _compare_quantization_command(args: argparse.Namespace) -> None:
+    for artifact in (args.checkpoint, args.quantized):
+        if args.output is not None and args.output.resolve() == artifact.resolve():
+            raise ValueError("--output cannot replace either checkpoint")
+    config = _load_args_config(args)
+    if type(args.seed) is not int:
+        raise ValueError("--seed must be an integer")
+    if args.tokens is not None and (type(args.tokens) is not int or args.tokens <= 0):
+        raise ValueError("--tokens must be a positive integer")
+    if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
+        raise ValueError("--batches must be a positive integer")
+    manifest = _validated_manifest(config, splits={args.split})
+    dataset = _dataset(config, manifest, args.split, required=False)
+    if dataset is None:
+        raise ValueError(f"{args.split} split is too small for configured sequence length")
+    device = _resolve_inference_device(args.device or config.training.device)
+    reference = load_model_checkpoint(args.checkpoint, device=device)
+    quantized = load_quantized_checkpoint(args.quantized, device=device)
+    _require_model_config_match(reference.identity.model_config, config.model)
+    _require_model_config_match(
+        quantized.model_config.model_dump(mode="json"),
+        config.model,
+    )
+    tokenizer_sha256 = sha256_file(config.tokenizer.path)
+    if reference.identity.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from source checkpoint identity")
+    if quantized.manifest.tokenizer_sha256 != tokenizer_sha256:
+        raise ValueError("configured tokenizer checksum differs from quantized export identity")
+    report = compare_quantized_models(
+        reference.model,
+        quantized.model,
+        dataset,
+        split=args.split,
+        seed=args.seed,
+        batch_size=config.training.micro_batch_size,
+        batches=args.batches if args.tokens is None else None,
+        tokens=args.tokens,
+        reference_checkpoint_sha256=sha256_file(args.checkpoint),
+        quantized_checkpoint_sha256=sha256_file(args.quantized),
+        corpus_sha256=manifest.artifacts[args.split].sha256,
+        reference_size_bytes=args.checkpoint.stat().st_size,
+        quantized_size_bytes=args.quantized.stat().st_size,
+        quantized_manifest=quantized.manifest.to_dict(),
+        device=device,
+        warmup_runs=args.warmup_runs,
+        measured_runs=args.measured_runs,
+    )
+    if args.output is not None:
+        write_quantization_comparison_report(
+            report,
+            args.output,
+            overwrite=args.overwrite,
+        )
+    print(
+        json.dumps(
+            {
+                "loss_delta_nats_per_token": report.quality["loss_delta_nats_per_token"],
+                "perplexity_ratio": report.quality["perplexity_ratio"],
+                "latency_ratio": report.quality["latency_ratio"],
+                "artifact_size_ratio": report.quality["artifact_size_ratio"],
+                "evaluated_tokens": report.evaluation["evaluated_tokens"],
+                "report": str(args.output) if args.output is not None else None,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _generate_command(args: argparse.Namespace) -> None:

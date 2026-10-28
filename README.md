@@ -447,6 +447,16 @@ paths and remain conditional on compatible library version, device, serializatio
 kernels. Export succeeds only after strict reload and deterministic numeric round trip. Existing
 destination is preserved on failure and replaced only with `--overwrite`.
 
+### Compare quantization quality and cost
+
+Evaluate source checkpoint and export on identical deterministic validation windows:
+
+```powershell
+uv run tinyllm compare-quantization --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --quantized exports/tinyllm-int4.pt --tokens 4096 --seed 42 --output runs/int4-comparison.json
+```
+
+The versioned JSON report records mean loss and perplexity for both models, measured latency per target token, artifact and model-state sizes, CUDA peak allocation when available, and the complete quantization manifest, including converted layers and exclusions. Repeat for every recipe on the target device before drawing quality or speed conclusions. CPU reports set CUDA memory to `null`; existing reports remain untouched unless `--overwrite` is supplied.
+
 ## Functional checks and hardware benchmarks
 
 The normal `uv run pytest` suite checks deterministic behavior and correctness. Benchmark unit tests
