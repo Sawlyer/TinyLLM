@@ -136,6 +136,10 @@ Default configuration keeps `training.max_steps: 10000`; first command stops ear
 without changing checkpoint configuration snapshot. Resume therefore remains configuration-compatible
 and continues toward step 10000.
 
+`Ctrl+C` and `SIGTERM` finish the current optimizer step, write a resumable `interrupt.pt` in the
+checkpoint directory, then stop. Abrupt termination that cannot deliver a signal can only resume
+from the latest periodic `step-*.pt` checkpoint.
+
 ### Training metrics
 
 Each training report appends one record to `runs/metrics.jsonl` and one row to
