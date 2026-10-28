@@ -25,6 +25,7 @@ from tinyllm.config.load import load_config
 from tinyllm.config.schema import GenerationConfig, ModelConfig, TinyLLMConfig
 from tinyllm.data.artifacts import CorpusManifest, load_manifest, sha256_file
 from tinyllm.data.audit import audit_artifacts
+from tinyllm.data.diagnostics import diagnose_tokenizer
 from tinyllm.data.loader import TokenDataset
 from tinyllm.data.prepare import prepare_corpus
 from tinyllm.data.validation import validate_manifest_for_model, validate_tokenizer_for_model
@@ -96,6 +97,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("--manifest", type=Path, required=True)
     audit.set_defaults(handler=_audit_artifacts_command)
+
+    tokenizer_diagnostic = commands.add_parser(
+        "diagnose-tokenizer",
+        help="report tokenizer and prepared corpus diagnostics without changing artifacts",
+    )
+    tokenizer_diagnostic.add_argument("--manifest", type=Path, required=True)
+    tokenizer_diagnostic.add_argument(
+        "--splits", nargs="+", choices=("train", "validation"), default=("train", "validation")
+    )
+    tokenizer_diagnostic.add_argument("--sample-documents", type=int, default=1000)
+    tokenizer_diagnostic.add_argument("--compare-vocab-sizes", nargs="*", type=int, default=[])
+    tokenizer_diagnostic.add_argument("--output", type=Path)
+    tokenizer_diagnostic.add_argument("--overwrite", action="store_true")
+    tokenizer_diagnostic.set_defaults(handler=_diagnose_tokenizer_command)
 
     train = commands.add_parser("train", help="train or resume a model")
     _add_config_arguments(train)
@@ -483,6 +498,31 @@ def _inspect_data_command(args: argparse.Namespace) -> None:
             sort_keys=True,
         )
     )
+
+
+def _diagnose_tokenizer_command(args: argparse.Namespace) -> None:
+    report = diagnose_tokenizer(
+        args.manifest,
+        splits=args.splits,
+        sample_documents=args.sample_documents,
+        compare_vocab_sizes=args.compare_vocab_sizes,
+    )
+    if args.output is None:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    output = args.output.resolve()
+    sources = {Path(report["manifest"]).resolve(), Path(report["tokenizer"]["path"]).resolve()}
+    sources.update(
+        (args.manifest.resolve().parent / split["artifact"]["filename"]).resolve()
+        for split in report["splits"].values()
+    )
+    if output in sources:
+        raise ValueError("--output cannot replace a manifest or tokenizer artifact")
+    _require_writable_output(output, overwrite=args.overwrite, label="tokenizer report")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+    print(json.dumps({"report": str(output)}, sort_keys=True))
 
 
 def _audit_artifacts_command(args: argparse.Namespace) -> None:

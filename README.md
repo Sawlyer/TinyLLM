@@ -83,6 +83,7 @@ Preparation resolves remote revision, records upstream fingerprint, trains token
 uv run tinyllm prepare --config configs/tinyllm.yaml
 uv run tinyllm inspect-data --config configs/tinyllm.yaml
 uv run tinyllm audit-artifacts --manifest data/processed/manifest.json
+uv run tinyllm diagnose-tokenizer --manifest data/processed/manifest.json --splits train validation --sample-documents 1000 --compare-vocab-sizes 8192 16384 --output outputs/tokenizer-diagnostics.json
 ```
 
 `audit-artifacts` reads a manifest and its referenced tokenizer and token files without changing
@@ -90,6 +91,13 @@ them. It works offline without loading a model or initializing CUDA, prints a JS
 returns a failing exit code when it finds invalid metadata, missing or truncated files, checksum
 mismatches, tokenizer identity changes, or token IDs outside the vocabulary. Legacy manifests
 remain untouched and produce a compatibility warning.
+`diagnose-tokenizer` validates the manifest, tokenizer and token artifact checksums before reading.
+Token totals, vocabulary use and document-length percentiles cover each selected split. Quality
+signals and decoded examples use the first `--sample-documents` documents, in stable corpus order.
+Optional vocabulary comparisons retrain BPE configurations on the same decoded sample from the
+train artifact; results describe that bounded sample, not the original unprocessed source.
+The command never rewrites corpus artifacts. Its JSON report prints to stdout unless `--output`
+is set; existing reports require `--overwrite`.
 
 Outputs never overwrite by default. Rebuilding intentional dataset requires explicit
 `--overwrite`. For offline smoke run, set `data.dataset_name` to local UTF-8 text file; each
