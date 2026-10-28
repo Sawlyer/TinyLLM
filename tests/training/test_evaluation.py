@@ -228,7 +228,9 @@ def test_evaluate_command_uses_selected_split_and_writes_report(monkeypatch, tmp
     assert report["corpus_sha256"] == "train-corpus-sha256"
     captured = capsys.readouterr()
     assert "nats/token" in captured.err
-    assert json.loads(captured.out)["validation_loss"] is None
+    summary = json.loads(captured.out)
+    assert summary["validation_loss"] is None
+    assert summary["perplexity_saturated"] is False
 
 
 def test_evaluate_command_never_overwrites_its_checkpoint(tmp_path):
