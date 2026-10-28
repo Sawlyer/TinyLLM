@@ -104,20 +104,6 @@ def diagnose_tokenizer(
                 )
             )
 
-    warnings = []
-    if len(document_lengths) != declared_documents:
-        warnings.append("observed document count differs from manifest")
-    if any(not text for text in decoded_documents):
-        warnings.append("empty documents found in inspected sample")
-    if duplicate_documents:
-        warnings.append("duplicate documents found in inspected sample")
-    if replacement_chars:
-        warnings.append("invalid or replacement Unicode characters found in inspected sample")
-    if control_chars:
-        warnings.append("unexpected control characters found in inspected sample")
-    if format_chars:
-        warnings.append("Unicode format characters found in inspected sample")
-
     return {
         "manifest": str(manifest_path.resolve()),
         "dataset": manifest.dataset_name,
@@ -234,6 +220,19 @@ def _split_report(
         if token_counts[token_id]
     ]
     lengths_sorted = sorted(document_lengths)
+    warnings = []
+    if len(document_lengths) != declared_documents:
+        warnings.append("observed document count differs from manifest")
+    if any(not text for text in decoded_documents):
+        warnings.append("empty documents found in inspected sample")
+    if duplicate_documents:
+        warnings.append("duplicate documents found in inspected sample")
+    if replacement_chars:
+        warnings.append("invalid or replacement Unicode characters found in inspected sample")
+    if control_chars:
+        warnings.append("unexpected control characters found in inspected sample")
+    if format_chars:
+        warnings.append("Unicode format characters found in inspected sample")
     return {
         "artifact": {
             "filename": artifact.filename,
