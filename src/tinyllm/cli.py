@@ -134,6 +134,28 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--no-cache", action="store_true")
     generate_parser.set_defaults(handler=_generate_command)
 
+    interactive_parser = commands.add_parser(
+        "interactive", help="try independent prompts in a local terminal session"
+    )
+    _add_config_arguments(interactive_parser, default=None)
+    interactive_parser.add_argument("--checkpoint", type=Path, required=True)
+    interactive_parser.add_argument("--max-new-tokens", type=int)
+    interactive_parser.add_argument("--temperature", type=float)
+    interactive_parser.add_argument("--top-k", type=int)
+    interactive_parser.add_argument("--top-p", type=float)
+    interactive_parser.add_argument("--repetition-penalty", type=float)
+    interactive_parser.add_argument("--stop", action="append", default=[])
+    interactive_parser.add_argument("--seed", type=int)
+    interactive_parser.add_argument("--device")
+    interactive_parser.add_argument("--quantized", action="store_true")
+    interactive_parser.add_argument("--no-cache", action="store_true")
+    interactive_parser.add_argument(
+        "--history-file",
+        type=Path,
+        help="append prompts and responses to this JSONL file; disabled by default",
+    )
+    interactive_parser.set_defaults(handler=_interactive_command)
+
     benchmark = commands.add_parser("benchmark-precision", help="compare training precision modes")
     _add_config_arguments(benchmark)
     benchmark.add_argument("--modes", nargs="+", default=["bf16", "fp8"])
@@ -639,6 +661,73 @@ def _generate_command(args: argparse.Namespace) -> None:
     else:
         for index, result in enumerate(results, start=1):
             print(f"[{index}] {result['text']}")
+
+
+def _interactive_command(args: argparse.Namespace) -> None:
+    if args.quantized:
+        if args.config is None:
+            raise ValueError("--config is required with --quantized")
+        config = load_config(args.config, args.overrides)
+    else:
+        config = _config_for_checkpoint(args.checkpoint, args.config, args.overrides)
+    device = _resolve_inference_device(args.device or config.training.device)
+    if args.quantized:
+        quantized = load_quantized_checkpoint(args.checkpoint, device=device)
+        model = quantized.model
+        model_config = quantized.model_config
+        expected_tokenizer_sha256 = quantized.manifest.tokenizer_sha256
+        if expected_tokenizer_sha256 is None:
+            raise ValueError("legacy quantized checkpoint lacks tokenizer identity; re-export it")
+    else:
+        checkpoint = load_model_checkpoint(args.checkpoint, device=device)
+        model = checkpoint.model
+        model_config = ModelConfig.model_validate(checkpoint.identity.model_config)
+        expected_tokenizer_sha256 = checkpoint.identity.tokenizer_sha256
+    _require_model_config_match(model_config.model_dump(mode="json"), config.model)
+    tokenizer_path = config.tokenizer.path
+    if sha256_file(tokenizer_path) != expected_tokenizer_sha256:
+        raise ValueError("tokenizer checksum differs from checkpoint identity")
+    tokenizer = _load_tokenizer(tokenizer_path)
+    generation_values = config.generation.model_dump()
+    generation_values.update(
+        {
+            field: value
+            for field, value in {
+                "max_new_tokens": args.max_new_tokens,
+                "temperature": args.temperature,
+                "top_k": args.top_k,
+                "top_p": args.top_p,
+                "repetition_penalty": args.repetition_penalty,
+                "seed": args.seed,
+            }.items()
+            if value is not None
+        }
+    )
+    if args.stop:
+        stop_sequences = [tokenizer.encode(value).ids for value in args.stop]
+        if any(not sequence for sequence in stop_sequences):
+            raise ValueError("each --stop value must produce at least one token")
+        generation_values["stop_token_sequences"] = stop_sequences
+    if generation_values["eos_token_id"] is None:
+        eos_token_id = tokenizer.token_to_id("<eos>")
+        if eos_token_id is None:
+            raise ValueError("validated tokenizer does not contain required <eos> token")
+        generation_values["eos_token_id"] = eos_token_id
+    validate_tokenizer_for_model(tokenizer, model_config)
+    generation = GenerationConfig.model_validate(generation_values)
+
+    from tinyllm.inference.interactive import InteractiveSession
+
+    InteractiveSession(
+        model=model,
+        model_config=model_config,
+        tokenizer=tokenizer,
+        generation=generation,
+        device=device,
+        checkpoint=args.checkpoint,
+        use_cache=not args.no_cache,
+        history_file=args.history_file,
+    ).run()
 
 
 def _benchmark_precision_command(args: argparse.Namespace) -> None:

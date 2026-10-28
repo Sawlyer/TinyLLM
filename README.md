@@ -130,6 +130,8 @@ uv run tinyllm train --config configs/tinyllm.yaml --resume checkpoints/latest.p
 uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --batches 8
 uv run tinyllm generate --checkpoint checkpoints/resumed.pt --prompt "Once upon a time"
 uv run tinyllm generate --checkpoint checkpoints/resumed.pt --prompt "A fox" --prompt "A lake" --temperature 0.8 --top-k 40 --top-p 0.9 --repetition-penalty 1.1 --stop "<eos>" --json
+uv run tinyllm interactive --checkpoint checkpoints/resumed.pt
+uv run tinyllm interactive --checkpoint checkpoints/resumed.pt --history-file outputs/session.jsonl
 ```
 
 Checkpoint stores model, optimizer, schedule boundary, precision state, Python/PyTorch/CUDA RNG,
@@ -142,6 +144,11 @@ to `1.0` (disabled); positive logits are divided by it and negative logits multi
 `--stop` for text sequences that end generation; stop tokens are omitted from the returned text.
 `--json` prints effective parameters plus per-prompt generated token count, tokens/second, and
 first-token latency in milliseconds. Timing starts after model loading and prompt tokenization.
+`interactive` loads a checkpoint once, then accepts independent prompts. Use `/set temperature 0.8`,
+`/set top_k 40`, `/history`, `/reset`, and `/quit`. Press Ctrl+C during generation to stop that
+response; press it at the prompt to leave. Prompt and response text stay in memory unless
+`--history-file` is explicitly supplied. This mode does not add prior turns to later prompts: a
+chat-style format only works when the model's training data taught it that format.
 Default configuration keeps `training.max_steps: 10000`; first command stops early through CLI
 without changing checkpoint configuration snapshot. Resume therefore remains configuration-compatible
 and continues toward step 10000.
