@@ -127,6 +127,7 @@ class StreamingCorpusQuality:
         self.source_records = 0
         self.invalid_records = 0
         self.blank_documents = 0
+        self.exact_split_conflicts_prevented = 0
         self.splits = {"train": _SplitStats(), "validation": _SplitStats()}
         self.near_duplicate_examples: list[dict[str, object]] = []
         self.database = sqlite3.connect(database_path)
@@ -165,8 +166,17 @@ class StreamingCorpusQuality:
         else:
             self.invalid_records += 1
 
-    def record(self, text: str, split: str) -> bool:
+    def resolve_split(self, text: str, proposed_split: str) -> str:
+        """Keep exact normalized duplicates in the first duplicate's assigned split."""
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        seen = self.database.execute(
+            "SELECT split FROM seen_text WHERE digest = ?", (digest,)
+        ).fetchone()
+        return proposed_split if seen is None else seen[0]
+
+    def record(self, text: str, split: str, *, proposed_split: str | None = None) -> bool:
         """Count one normalized document and return whether it should be kept."""
+        proposed_split = proposed_split or split
         self.source_records += 1
         stats = self.splits[split]
         repeated_ratio = _max_repeated_character_ratio(text)
@@ -179,16 +189,18 @@ class StreamingCorpusQuality:
             "SELECT split FROM seen_text WHERE digest = ?", (digest,)
         ).fetchone()
         exact_duplicate = seen is not None
-        cross_split_exact = exact_duplicate and seen[0] != split
+        cross_split_exact = exact_duplicate and seen[0] != proposed_split
         if not exact_duplicate:
             self.database.execute(
                 "INSERT INTO seen_text (digest, split) VALUES (?, ?)", (digest, split)
             )
+        elif cross_split_exact:
+            self.exact_split_conflicts_prevented += 1
 
         signature = _simhash(text)
         near_match = None if exact_duplicate else self._find_near_match(signature)
         near_duplicate = near_match is not None
-        cross_split_near = near_duplicate and near_match[1] != split
+        cross_split_near = near_duplicate and near_match[1] != proposed_split
         if exact_duplicate:
             stats.duplicate_exact += 1
             if cross_split_exact:
@@ -325,6 +337,11 @@ class StreamingCorpusQuality:
                 "memory": "SQLite disk index; bounded page cache; stream order defines retained duplicate",
             },
             "filters": self.options.to_dict(),
+            "split_policy": (
+                "seeded BLAKE2b on source document ID; exact normalized duplicates inherit "
+                "first occurrence's split"
+            ),
+            "exact_split_conflicts_prevented": self.exact_split_conflicts_prevented,
             "source_records": self.source_records,
             "blank_documents": self.blank_documents,
             "invalid_records": self.invalid_records,
