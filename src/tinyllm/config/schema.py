@@ -1,8 +1,9 @@
 """Validated configuration models for TinyLLM."""
 
+from math import isfinite
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 
 class StrictConfig(BaseModel):
@@ -86,8 +87,26 @@ class GenerationConfig(StrictConfig):
     temperature: float = Field(ge=0)
     top_k: int | None = Field(default=None, gt=0)
     top_p: float = Field(gt=0, le=1)
-    seed: int
+    repetition_penalty: float = Field(default=1.0, gt=0)
+    seed: int = Field(ge=0)
     eos_token_id: int | None = Field(default=None, ge=0)
+    stop_token_sequences: list[list[StrictInt]] = Field(default_factory=list)
+
+    @field_validator("repetition_penalty")
+    @classmethod
+    def _finite_repetition_penalty(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("repetition_penalty must be finite")
+        return value
+
+    @field_validator("stop_token_sequences")
+    @classmethod
+    def _non_empty_stop_sequences(cls, sequences: list[list[int]]) -> list[list[int]]:
+        if any(not sequence for sequence in sequences):
+            raise ValueError("stop_token_sequences entries must not be empty")
+        if any(token_id < 0 for sequence in sequences for token_id in sequence):
+            raise ValueError("stop_token_sequences token IDs must be non-negative")
+        return sequences
 
 
 class QuantizationConfig(StrictConfig):
@@ -103,3 +122,4 @@ class TinyLLMConfig(StrictConfig):
     logging: LoggingConfig
     generation: GenerationConfig
     quantization: QuantizationConfig
+

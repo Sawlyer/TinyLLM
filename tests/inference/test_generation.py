@@ -165,6 +165,38 @@ def test_generation_stops_after_eos(tiny_model: TinyLLM) -> None:
     assert torch.equal(generated, torch.tensor([[1, 4, 0]]))
 
 
+def test_generation_stops_after_multi_token_sequence(tiny_model: TinyLLM) -> None:
+    config = GenerationConfig(
+        max_new_tokens=5,
+        temperature=0.0,
+        top_k=None,
+        top_p=1.0,
+        seed=2,
+        stop_token_sequences=[[0, 0]],
+    )
+    with torch.no_grad():
+        for parameter in tiny_model.parameters():
+            parameter.zero_()
+
+    generated = generate(tiny_model, torch.tensor([[1, 4]]), config)
+
+    assert torch.equal(generated, torch.tensor([[1, 4, 0, 0]]))
+
+
+def test_generation_rejects_stop_token_outside_vocabulary(tiny_model: TinyLLM) -> None:
+    config = GenerationConfig(
+        max_new_tokens=5,
+        temperature=0.0,
+        top_k=None,
+        top_p=1.0,
+        seed=2,
+        stop_token_sequences=[[tiny_model.config.vocab_size]],
+    )
+
+    with pytest.raises(ValueError, match="stop token"):
+        generate(tiny_model, torch.tensor([[1, 4]]), config)
+
+
 def test_generation_config_exposes_optional_eos_without_assuming_token_two(
     tiny_model: TinyLLM,
 ) -> None:
@@ -207,3 +239,4 @@ def test_generation_rejects_prompt_longer_than_context(tiny_model: TinyLLM) -> N
 
     with pytest.raises(ValueError, match="prompt.*context"):
         generate(tiny_model, prompt, greedy_config(1))
+
