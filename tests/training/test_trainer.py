@@ -1,8 +1,8 @@
-import json
 import csv
-from types import SimpleNamespace
+import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -118,6 +118,16 @@ def test_tiny_training_reduces_loss(tiny_training_fixture: Trainer) -> None:
     assert summary.final_loss < summary.initial_loss
     assert summary.validation_loss is not None
     assert math.isfinite(summary.validation_loss)
+
+
+def test_train_invokes_step_callback_once_after_each_completed_step(
+    tiny_training_fixture: Trainer,
+) -> None:
+    completed_steps: list[int] = []
+
+    tiny_training_fixture.train(max_steps=3, on_step_end=completed_steps.append)
+
+    assert completed_steps == [1, 2, 3]
 
 
 def test_fp8_training_converts_model_and_forces_compile_before_use(
@@ -373,3 +383,4 @@ def test_throughput_excludes_evaluation_validation_and_metric_flush(
     ).train(max_steps=2)
 
     assert [record["tokens_per_second"] for record in logger.records] == pytest.approx([16.0, 16.0])
+

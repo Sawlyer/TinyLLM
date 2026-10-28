@@ -7,10 +7,12 @@ import importlib.util
 import json
 import math
 import os
+import platform
 import random
 import shutil
 import signal
 import sys
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -155,6 +157,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="append prompts and responses to this JSONL file; disabled by default",
     )
     interactive_parser.set_defaults(handler=_interactive_command)
+
+    profile_parser = commands.add_parser(
+        "profile-training", help="profile a short run using real prepared training batches"
+    )
+    _add_config_arguments(profile_parser)
+    profile_parser.add_argument("--warmup-steps", type=int, default=2)
+    profile_parser.add_argument("--steps", type=int, default=3, dest="measured_steps")
+    profile_parser.add_argument("--device")
+    profile_parser.add_argument("--trace", type=Path)
+    profile_parser.add_argument("--output", type=Path)
+    profile_parser.add_argument("--overwrite", action="store_true")
+    profile_parser.set_defaults(handler=_profile_training_command)
 
     benchmark = commands.add_parser("benchmark-precision", help="compare training precision modes")
     _add_config_arguments(benchmark)
@@ -728,6 +742,107 @@ def _interactive_command(args: argparse.Namespace) -> None:
         use_cache=not args.no_cache,
         history_file=args.history_file,
     ).run()
+
+
+def _profile_training_command(args: argparse.Namespace) -> None:
+    config = _load_args_config(args)
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative")
+    if args.measured_steps <= 0:
+        raise ValueError("--steps must be positive")
+    if args.trace is not None and args.output is not None:
+        if args.trace.resolve() == args.output.resolve():
+            raise ValueError("--trace and --output must use different files")
+    for path, label in ((args.trace, "profiler trace"), (args.output, "profile report")):
+        if path is not None and path.exists() and not args.overwrite:
+            raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
+
+    profile_values = config.model_dump(mode="python")
+    total_steps = 1 + args.warmup_steps + args.measured_steps
+    training_values = profile_values["training"]
+    if args.device is not None:
+        training_values["device"] = args.device
+    training_values["max_steps"] = total_steps
+    training_values["warmup_steps"] = 0
+    logging_values = profile_values["logging"]
+    with tempfile.TemporaryDirectory(prefix="tinyllm-profile-") as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        training_values["checkpoint_dir"] = temporary_root / "checkpoints"
+        logging_values["run_dir"] = temporary_root / "logs"
+        logging_values["log_interval"] = 1
+        logging_values["checkpoint_interval"] = total_steps + 1
+        profile_config = TinyLLMConfig.model_validate(profile_values)
+
+        setup_started = perf_counter()
+        trainer, _ = _build_trainer(profile_config)
+        if trainer.device.type == "cuda":
+            torch.cuda.synchronize(trainer.device)
+        setup_seconds = max(0.0, perf_counter() - setup_started)
+
+        from tinyllm.training.profiling import run_training_profile
+
+        report = run_training_profile(
+            trainer,
+            warmup_steps=args.warmup_steps,
+            measured_steps=args.measured_steps,
+            trace_path=args.trace,
+        )
+
+    device_info: dict[str, object] = {
+        "device": str(trainer.device),
+        "platform": platform.platform(),
+        "processor": platform.processor() or None,
+        "python_version": platform.python_version(),
+        "torch_version": str(torch.__version__),
+        "cuda_version": torch.version.cuda,
+    }
+    if trainer.device.type == "cuda":
+        properties = torch.cuda.get_device_properties(trainer.device)
+        device_info.update(
+            {
+                "gpu_name": torch.cuda.get_device_name(trainer.device),
+                "gpu_capability": list(torch.cuda.get_device_capability(trainer.device)),
+                "gpu_total_memory_bytes": int(properties.total_memory),
+            }
+        )
+    effective_training_config = profile_config.training.model_dump(mode="json")
+    effective_training_config["checkpoint_dir"] = "<temporary>"
+    report.update(
+        {
+            "configuration": config.model_dump(mode="json"),
+            "effective_training": {
+                "device": str(trainer.device),
+                "precision": profile_config.training.precision,
+                "micro_batch_size": profile_config.training.micro_batch_size,
+                "gradient_accumulation_steps": (
+                    profile_config.training.gradient_accumulation_steps
+                ),
+                "sequence_length": profile_config.model.max_seq_len,
+                "optimizer_steps": total_steps,
+                "unmeasured_priming_steps": 1,
+                "training_config": effective_training_config,
+            },
+            "hardware_and_versions": device_info,
+            "measurement_setup_seconds": setup_seconds,
+            "measurement_cost_note": (
+                "CUDA batch timing synchronizes before and after each profiled transfer; "
+                "synchronization and trace export add measurement cost. "
+                "profiled_wall_seconds includes profiling, training, and optional trace export. "
+                "Model and dataset setup are reported separately."
+            ),
+        }
+    )
+    serialized = json.dumps(report, indent=2, sort_keys=True)
+    if args.output is None:
+        print(serialized)
+        return
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(serialized + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {"report": str(args.output), "trace": str(args.trace) if args.trace else None}
+        )
+    )
 
 
 def _benchmark_precision_command(args: argparse.Namespace) -> None:

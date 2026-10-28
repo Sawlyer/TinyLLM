@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,7 +107,11 @@ class Trainer:
             self._training_model = torch.compile(self.model)
 
     def train(
-        self, max_steps: int | None = None, *, overwrite_checkpoints: bool = False
+        self,
+        max_steps: int | None = None,
+        *,
+        overwrite_checkpoints: bool = False,
+        on_step_end: Callable[[int], None] | None = None,
     ) -> TrainingSummary:
         total_steps = self.config.training.max_steps
         steps = total_steps if max_steps is None else max_steps
@@ -146,12 +150,26 @@ class Trainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     accumulated_loss: Tensor | None = None
                     for _ in range(self.config.training.gradient_accumulation_steps):
+                        if on_step_end is not None:
+                            self._synchronize_for_metrics()
                         data_loading_started = self._clock()
-                        inputs, targets = self._sample_training_batch()
+                        with (
+                            torch.profiler.record_function("tinyllm/data_loading")
+                            if on_step_end is not None
+                            else nullcontext()
+                        ):
+                            inputs, targets = self._sample_training_batch()
+                        if on_step_end is not None:
+                            self._synchronize_for_metrics()
                         interval_data_loading_seconds += self._clock() - data_loading_started
-                        with self.precision.autocast():
-                            output = self._training_model(inputs, targets)
-                            loss = output.loss
+                        with (
+                            torch.profiler.record_function("tinyllm/model_forward")
+                            if on_step_end is not None
+                            else nullcontext()
+                        ):
+                            with self.precision.autocast():
+                                output = self._training_model(inputs, targets)
+                                loss = output.loss
                         if loss is None:
                             raise RuntimeError("model did not return a training loss")
                         self._require_finite_tensor(loss, f"loss at step {step}")
@@ -162,27 +180,39 @@ class Trainer:
                             else accumulated_loss + detached_loss
                         )
                         normalized_loss = loss / self.config.training.gradient_accumulation_steps
-                        self.precision.backward(normalized_loss)
+                        with (
+                            torch.profiler.record_function("tinyllm/backward")
+                            if on_step_end is not None
+                            else nullcontext()
+                        ):
+                            self.precision.backward(normalized_loss)
 
                     if accumulated_loss is None:
                         raise RuntimeError("gradient accumulation produced no loss")
-                    self.precision.unscale_(self.optimizer)
-                    self._require_finite_gradients(step)
-                    gradient_norm = nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.config.training.max_grad_norm
-                    )
-                    self._require_finite_tensor(gradient_norm, f"gradient norm at step {step}")
-                    learning_rate = cosine_lr(
-                        step,
-                        self.config.training.warmup_steps,
-                        total_steps,
-                        self.config.training.learning_rate,
-                        self.config.training.min_learning_rate,
-                    )
-                    for group in self.optimizer.param_groups:
-                        group["lr"] = learning_rate
-                    self.precision.step(self.optimizer)
-                    self._require_finite_parameters(step)
+                    with (
+                        torch.profiler.record_function("tinyllm/optimizer")
+                        if on_step_end is not None
+                        else nullcontext()
+                    ):
+                        self.precision.unscale_(self.optimizer)
+                        self._require_finite_gradients(step)
+                        gradient_norm = nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.config.training.max_grad_norm
+                        )
+                        self._require_finite_tensor(
+                            gradient_norm, f"gradient norm at step {step}"
+                        )
+                        learning_rate = cosine_lr(
+                            step,
+                            self.config.training.warmup_steps,
+                            total_steps,
+                            self.config.training.learning_rate,
+                            self.config.training.min_learning_rate,
+                        )
+                        for group in self.optimizer.param_groups:
+                            group["lr"] = learning_rate
+                        self.precision.step(self.optimizer)
+                        self._require_finite_parameters(step)
 
                     step_tokens = (
                         self.config.training.micro_batch_size
@@ -210,7 +240,12 @@ class Trainer:
                     if should_validate:
                         self._synchronize_for_metrics()
                         evaluation_started = self._clock()
-                        last_validation_loss = self._validation_loss(self.validation_dataset)
+                        with (
+                            torch.profiler.record_function("tinyllm/validation")
+                            if on_step_end is not None
+                            else nullcontext()
+                        ):
+                            last_validation_loss = self._validation_loss(self.validation_dataset)
                         self._synchronize_for_metrics()
                         interval_evaluation_seconds += self._clock() - evaluation_started
                         last_validation_step = step
@@ -259,6 +294,8 @@ class Trainer:
                                 "pass --overwrite to replace it"
                             )
                         self.save_checkpoint(checkpoint_path)
+                    if on_step_end is not None:
+                        on_step_end(step)
 
                 final_loss = self._monitor_loss(self.train_dataset)
                 self._require_finite_scalar(final_loss, "loss after training")
