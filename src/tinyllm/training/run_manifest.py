@@ -110,6 +110,11 @@ def _artifact_digests(config: TinyLLMConfig, args: argparse.Namespace) -> dict[s
     for name, value in vars(args).items():
         if isinstance(value, Path) and value.is_file():
             candidates[f"arguments.{name}"] = value
+    output_checkpoint = getattr(args, "checkpoint", None)
+    if not isinstance(output_checkpoint, Path):
+        output_checkpoint = config.training.checkpoint_dir / "latest.pt"
+    if output_checkpoint.is_file():
+        candidates["checkpoints.output"] = output_checkpoint
     interrupt_checkpoint = config.training.checkpoint_dir / "interrupt.pt"
     if interrupt_checkpoint.is_file():
         candidates["checkpoints.interrupt"] = interrupt_checkpoint
@@ -183,7 +188,16 @@ def start_run_manifest(
     if resume_sha is not None and isinstance(resume_path, Path):
         for candidate_path, candidate_payload in loaded_manifests:
             artifacts = candidate_payload.get("artifacts")
-            has_matching_artifact = isinstance(artifacts, dict) and resume_sha in artifacts.values()
+            checkpoint_hashes = (
+                [
+                    digest
+                    for name, digest in artifacts.items()
+                    if name in {"arguments.resume", "checkpoints.output", "checkpoints.interrupt"}
+                ]
+                if isinstance(artifacts, dict)
+                else []
+            )
+            has_matching_artifact = resume_sha in checkpoint_hashes
             if has_matching_artifact:
                 matching_manifest = (candidate_path, candidate_payload)
                 break
