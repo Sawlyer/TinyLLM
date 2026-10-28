@@ -60,14 +60,22 @@ class TinyLLM(nn.Module):
         if attention_mask is not None:
             expected_mask_shape = (input_ids.shape[0], sequence_length, sequence_length)
             if attention_mask.shape != expected_mask_shape or attention_mask.dtype != torch.bool:
-                raise ValueError("attention_mask must be boolean with shape [batch, sequence, sequence]")
+                raise ValueError(
+                    "attention_mask must be boolean with shape [batch, sequence, sequence]"
+                )
             if attention_mask.device != input_ids.device:
                 raise ValueError("attention_mask must be on the input device")
             if caches is not None:
                 raise ValueError("attention_mask cannot be combined with KV caches")
         if loss_mask is not None:
-            if targets is None or loss_mask.shape != input_ids.shape or loss_mask.dtype != torch.bool:
-                raise ValueError("loss_mask requires targets and must be boolean with input_ids shape")
+            if (
+                targets is None
+                or loss_mask.shape != input_ids.shape
+                or loss_mask.dtype != torch.bool
+            ):
+                raise ValueError(
+                    "loss_mask requires targets and must be boolean with input_ids shape"
+                )
             if loss_mask.device != input_ids.device:
                 raise ValueError("loss_mask must be on the input device")
         if caches is not None and len(caches) != len(self.blocks):
