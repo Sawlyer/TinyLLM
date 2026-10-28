@@ -61,10 +61,10 @@ def run_training_profile(
                 max_steps=total_steps,
                 on_step_end=lambda _step: profiler.step(),
             )
-        profiling_seconds = max(0.0, perf_counter() - started_at)
         if trace_path is not None:
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             profiler.export_chrome_trace(str(trace_path))
+        profiling_seconds = max(0.0, perf_counter() - started_at)
     finally:
         trainer.metric_logger = previous_logger
 
@@ -162,9 +162,6 @@ def run_training_profile(
             "validation_seconds": sum(row["validation_seconds"] for row in step_reports),
             "profiled_wall_seconds": profiling_seconds,
             "trainer_elapsed_seconds": float(summary.elapsed_seconds),
-            "profiler_overhead_seconds": max(
-                profiling_seconds - float(summary.elapsed_seconds), 0.0
-            ),
             "steps": step_reports,
         },
         "memory": memory,
