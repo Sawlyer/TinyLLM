@@ -488,8 +488,9 @@ def test_sigint_during_validation_stops_before_next_training_step(
     assert loaded.step == 1
 
 
-def test_sigint_saves_completed_step_at_safe_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("signal_number", [signal.SIGINT, signal.SIGTERM])
+def test_termination_signal_saves_completed_step_at_safe_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signal_number: int
 ) -> None:
     installed_handler: dict[int, Any] = {}
     previous_handler = signal.getsignal(signal.SIGINT)
@@ -508,7 +509,7 @@ def test_sigint_saves_completed_step_at_safe_boundary(
     class InterruptingAdamW(torch.optim.AdamW):
         def step(self, closure=None):
             result = super().step(closure)
-            installed_handler[signal.SIGINT](signal.SIGINT, None)
+            installed_handler[signal_number](signal_number, None)
             return result
 
     trainer = Trainer(
@@ -527,6 +528,46 @@ def test_sigint_saves_completed_step_at_safe_boundary(
     assert loaded.step == 1
     assert loaded.tokens_processed == 16
     _assert_state_dict_equal(model.state_dict(), loaded.model_state)
+
+
+def test_sigterm_during_accumulation_finishes_and_checkpoints_optimizer_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previous_handlers = {
+        signal_number: signal.getsignal(signal_number)
+        for signal_number in (signal.SIGINT, signal.SIGTERM)
+    }
+    installed_handlers: dict[int, Any] = {}
+
+    def capture_handler(number: int, handler: Any) -> Any:
+        installed_handlers[number] = handler
+        return previous_handlers[number]
+
+    monkeypatch.setattr(signal, "signal", capture_handler)
+    trainer = _trainer(tmp_path, RecordingLogger())
+    original_sample = trainer._sample_training_batch
+    sampled_batches = 0
+
+    def interrupt_after_first_microbatch() -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal sampled_batches
+        batch = original_sample()
+        sampled_batches += 1
+        if sampled_batches == 1:
+            installed_handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return batch
+
+    monkeypatch.setattr(trainer, "_sample_training_batch", interrupt_after_first_microbatch)
+
+    with pytest.raises(KeyboardInterrupt):
+        trainer.train(max_steps=12)
+
+    assert sampled_batches == trainer.config.training.gradient_accumulation_steps
+    loaded = load_checkpoint(
+        trainer.config.training.checkpoint_dir / "interrupt.pt", trainer.artifact_identity
+    )
+    assert loaded.step == 1
+    assert loaded.tokens_processed == 16
+    _assert_state_dict_equal(trainer.model.state_dict(), loaded.model_state)
 
 
 def _assert_nested_equal(left: Any, right: Any) -> None:
