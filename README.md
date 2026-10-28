@@ -109,6 +109,11 @@ bounded disk-backed SimHash index. Review the report before adopting aggressive 
 Filtering happens after deterministic split assignment, so it never moves documents between splits.
 Changing quality filters for already prepared artifacts requires `--overwrite`.
 
+Exact normalized duplicates inherit the split assigned to their first occurrence, even when rows
+carry different source IDs. The report counts prevented split conflicts. Near duplicates remain in
+their deterministic source-ID split; SimHash is approximate and only reports possible cross-split
+matches, so it cannot guarantee that every paraphrase or transformed copy is grouped.
+
 Outputs never overwrite by default. Rebuilding intentional dataset requires explicit
 `--overwrite`. For offline smoke run, set `data.dataset_name` to local UTF-8 text file; each
 non-empty line becomes one document.
