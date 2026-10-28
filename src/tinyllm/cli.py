@@ -222,7 +222,8 @@ def _build_parser() -> argparse.ArgumentParser:
     inference_benchmark.add_argument("--overwrite", action="store_true")
     inference_benchmark.set_defaults(handler=_benchmark_inference_command)
 
-    interactive_parser = commands.add_parser(        "interactive", help="try independent prompts in a local terminal session"
+    interactive_parser = commands.add_parser(
+        "interactive", help="try independent prompts in a local terminal session"
     )
     _add_config_arguments(interactive_parser, default=None)
     interactive_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -421,7 +422,8 @@ def _export_weights_command(args: argparse.Namespace) -> None:
 def _checkpoint_inspect_command(args: argparse.Namespace) -> None:
     info = inspect_checkpoint(args.checkpoint)
     print(
-        json.dumps(            {
+        json.dumps(
+            {
                 "path": str(info.path),
                 "size_bytes": info.size_bytes,
                 "step": info.step,
@@ -620,7 +622,8 @@ def _inspect_data_command(args: argparse.Namespace) -> None:
             {
                 "checksum_validated": True,
                 "dataset": manifest.dataset_name,
-                "dataset_revision": manifest.dataset_revision,                "dataset_fingerprint": manifest.dataset_fingerprint,
+                "dataset_revision": manifest.dataset_revision,
+                "dataset_fingerprint": manifest.dataset_fingerprint,
                 "documents": manifest.document_counts,
                 "tokenizer_sha256": manifest.tokenizer_sha256,
                 "artifacts": {
@@ -819,7 +822,8 @@ def _evaluate_command(args: argparse.Namespace) -> None:
     if args.tokens is None and (type(args.batches) is not int or args.batches <= 0):
         raise ValueError("--batches must be a positive integer")
     manifest = _validated_manifest(config, splits={args.split})
-    dataset = _dataset(config, manifest, args.split, required=False)    if dataset is None:
+    dataset = _dataset(config, manifest, args.split, required=False)
+    if dataset is None:
         raise ValueError(f"{args.split} split is too small for configured sequence length")
     device = _resolve_inference_device(args.device or config.training.device)
     loaded = load_model_checkpoint(args.checkpoint, device=device)
@@ -1086,7 +1090,8 @@ def _generate_command(args: argparse.Namespace) -> None:
             (
                 len(stop_sequence)
                 for stop_sequence in stop_sequences
-                if len(new_ids) >= len(stop_sequence)                and new_ids[-len(stop_sequence) :] == stop_sequence
+                if len(new_ids) >= len(stop_sequence)
+                and new_ids[-len(stop_sequence) :] == stop_sequence
             ),
             default=0,
         )
@@ -1285,7 +1290,8 @@ def _profile_training_command(args: argparse.Namespace) -> None:
 
 
 def _benchmark_precision_command(args: argparse.Namespace) -> None:
-    config = _load_args_config(args)    output = args.output or config.logging.run_dir / "precision-benchmark.json"
+    config = _load_args_config(args)
+    output = args.output or config.logging.run_dir / "precision-benchmark.json"
     batch_size = config.training.micro_batch_size if args.batch_size is None else args.batch_size
     sequence_length = (
         config.model.max_seq_len if args.sequence_length is None else args.sequence_length
@@ -1484,7 +1490,8 @@ def _build_training_preflight_report(
             )
             state = load_training_checkpoint(Path(args.resume), expected_identity)
             _validate_resume_preflight(
-                config,                train_dataset,
+                config,
+                train_dataset,
                 state,
                 max_steps=steps,
                 device=device,
@@ -1683,7 +1690,8 @@ def _validate_resume_preflight(
     if type(available) is not bool or type(device_count) is not int:
         raise ValueError("checkpoint CUDA RNG metadata is invalid")
     if available:
-        if (            device_count <= 0
+        if (
+            device_count <= 0
             or type(active_device) is not int
             or not 0 <= active_device < device_count
             or len(state.cuda_rng_states) != device_count
