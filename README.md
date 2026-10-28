@@ -143,6 +143,31 @@ and continues toward step 10000.
 checkpoint directory, then stop. Abrupt termination that cannot deliver a signal can only resume
 from the latest periodic `step-*.pt` checkpoint.
 
+Inspect saved checkpoints before cleaning a directory. `list` only reads file names, sizes, and
+timestamps; `inspect` validates and deserializes one checkpoint on CPU without constructing a model:
+Inspection et plan de rétention chargent chaque checkpoint vérifié en mémoire CPU; prévoir une RAM
+au moins comparable à la taille du plus gros fichier.
+
+```powershell
+uv run tinyllm checkpoints list --directory checkpoints
+uv run tinyllm checkpoints inspect --checkpoint checkpoints/step-00001000.pt
+```
+
+Retention defaults to a preview. It keeps the latest valid resumable checkpoint, the best checkpoint
+with a matching `validation_step` in the selected metrics file, and the configured number of newest
+periodic checkpoints. `--keep-every` additionally keeps periodic steps divisible by that interval.
+Named files such as `latest.pt`, `interrupt.pt`, and `diagnostic.pt` remain untouched. Use
+`--apply` only after reviewing the printed deletion plan. If metrics contain multiple runs, pass
+`--run-id`; no files are removed when no valid resumable checkpoint or matching best metric exists.
+
+```powershell
+uv run tinyllm checkpoints prune --directory checkpoints --metrics runs/metrics.jsonl --keep-last 2 --keep-every 5000
+uv run tinyllm checkpoints prune --directory checkpoints --metrics runs/metrics.jsonl --keep-last 2 --keep-every 5000 --apply
+```
+
+Checkpoint writes use a temporary file and atomic replacement, so a failed save leaves an existing
+checkpoint at its destination intact. Pruning is never automatic.
+
 ### Training metrics
 
 Each training report appends one record to `runs/metrics.jsonl` and one row to
