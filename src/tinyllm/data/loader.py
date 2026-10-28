@@ -9,8 +9,6 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor
-
-
 from torch.utils.data import DataLoader, Dataset
 
 from tinyllm.data.artifacts import CorpusManifest, open_token_artifact
