@@ -495,6 +495,25 @@ state, compilation cache, and background load change measurements. Treat a small
 as inconclusive unless repeated runs support it. Investigate non-finite loss or correctness failures
 separately from performance.
 
+### Compare with a local Llama checkpoint
+
+TinyLLM accepts one explicit local `LlamaForCausalLM` directory containing `config.json`,
+`tokenizer.json`, and an unsharded `model.safetensors`. It maps compatible Llama weights to
+TinyLLM and evaluates both checkpoints on the same prepared validation tokens. The config file,
+model weights, and tokenizer must match the model and tokenizer identities in the supplied TinyLLM
+config and reference checkpoint.
+
+```powershell
+uv sync --extra external
+uv run tinyllm compare-local-llama --config configs/llama-local.yaml --checkpoint checkpoints/reference.pt --model-dir models/local-llama --tokens 4096 --seed 42 --output runs/llama-comparison.json
+```
+
+This adapter supports standard RoPE, SiLU SwiGLU, RMSNorm, grouped-query attention, and tied or
+untied word embeddings. It rejects other architectures, RoPE scaling, projection biases, sharded
+weights, mismatched tokenizers, and incompatible tensor layouts. Files load directly from the
+selected directory; no download, Transformers runtime, or repository-provided Python code runs.
+See `external_model` and `comparison` in the JSON report for provenance, quality, and cost.
+
 ## ONNX forward export
 
 Install the optional CPU export and runtime dependencies, then export a checkpoint:
