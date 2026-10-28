@@ -67,6 +67,7 @@ def diagnose_tokenizer(
             tokenizer=tokenizer,
             unk_id=unk_id,
             vocab_size=vocab_size,
+            special_token_ids=manifest.special_token_ids,
             declared_documents=manifest.document_counts[split],
             sample_limit=sample_documents,
         )
@@ -117,9 +118,6 @@ def diagnose_tokenizer(
             "special_tokens": {
                 token: {
                     "id": token_id,
-                    "frequency": int(token_counts[token_id])
-                    if token_id < len(token_counts)
-                    else 0,
                 }
                 for token, token_id in manifest.special_token_ids.items()
             },
@@ -177,6 +175,7 @@ def _split_report(
     tokenizer: Tokenizer,
     unk_id: int | None,
     vocab_size: int,
+    special_token_ids: dict[str, int],
     declared_documents: int,
     sample_limit: int,
 ) -> dict[str, Any]:
@@ -260,7 +259,7 @@ def _split_report(
             if sampled_token_total
             else 0.0,
             "unknown_tokens": sampled_unknown_tokens,
-            "unknown_tokens_in_split": int(token_counts[unk_id]) if unk_id is not None else 0,
+            "unknown_tokens_total": int(token_counts[unk_id]) if unk_id is not None else 0,
             "unicode_replacement_or_invalid_chars": replacement_chars,
             "control_chars": control_chars,
             "format_chars": format_chars,
@@ -271,6 +270,9 @@ def _split_report(
             "size": vocab_size,
             "used_ids": int(np.count_nonzero(token_counts)),
             "unused_ids": int(vocab_size - np.count_nonzero(token_counts)),
+            "special_token_frequencies": {
+                token: int(token_counts[token_id]) for token, token_id in special_token_ids.items()
+            },
             "top_tokens": top_tokens,
         },
     }
@@ -305,7 +307,7 @@ def _compare_tokenizer(
 
 def _is_unicode_noncharacter(character: str) -> bool:
     codepoint = ord(character)
-    return 0xFDD0 <= codepoint <= 0xFDEF or codepoint & 0xFFFF in {0xFFFE, 0xFFFF}
+    return 0xFDD0 <= codepoint <= 0xFDEF or (codepoint & 0xFFFF) in {0xFFFE, 0xFFFF}
 
 
 def _mean(values: list[int]) -> float:
