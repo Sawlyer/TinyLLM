@@ -227,6 +227,87 @@ uv run tinyllm checkpoints prune --directory checkpoints --metrics runs/metrics.
 Checkpoint writes use a temporary file and atomic replacement, so a failed save leaves an existing
 checkpoint at its destination intact. Pruning is never automatic.
 
+### Optimizer and hyperparameter guide
+
+Training currently uses PyTorch AdamW only. Its betas are fixed at `(0.9, 0.95)` and epsilon at
+`1e-8`; neither is configurable. Weight decay applies to matrix weights, while biases and
+normalization parameters are excluded. Set `training.weight_decay` to `0` to disable decay.
+The learning rate is the peak value: the scheduler linearly warms up, then decays with a cosine
+curve to `training.min_learning_rate`. Require
+`0 <= min_learning_rate <= learning_rate` and
+`0 <= warmup_steps < max_steps`. Precision changes autocast and gradient scaling, not the
+optimizer choice. BF16 needs device support; FP8 needs supported CUDA hardware, TorchAO, and
+compilation. Start with BF16 when supported, FP32 otherwise.
+
+#### Three starting budgets
+
+These commands assume prepared corpus artifacts and use separate run and checkpoint directories.
+Token estimates count training tokens only; validation, setup, and checkpoint I/O add time.
+Each optimizer step processes
+`micro_batch_size × model.max_seq_len × gradient_accumulation_steps` tokens.
+
+Short smoke run: 20 steps × 1 × 128 × 1 = 2,560 training tokens. Checks data loading, loss,
+checkpoint writing, and evaluation; too short to judge quality.
+
+```powershell
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=1 --set training.max_steps=20 --set training.warmup_steps=2 --set training.checkpoint_dir=checkpoints/smoke --set logging.run_dir=runs/smoke
+```
+
+Medium experiment: 100 steps × 4 × 256 × 2 = 204,800 training tokens. Useful for comparing a few
+settings on the same machine; still a small pre-training experiment, not a quality guarantee.
+
+```powershell
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=256 --set training.micro_batch_size=4 --set training.gradient_accumulation_steps=2 --set training.max_steps=100 --set training.warmup_steps=10 --set training.checkpoint_dir=checkpoints/medium --set logging.run_dir=runs/medium
+```
+
+Lower activation-memory starting point: 200 steps × 1 × 128 × 8 = 204,800 training tokens. Same
+token budget as the medium run with smaller micro-batches and more optimizer steps; expect different
+optimization behavior and likely longer wall time.
+
+```powershell
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=8 --set training.max_steps=200 --set training.warmup_steps=10 --set training.checkpoint_dir=checkpoints/low-memory --set logging.run_dir=runs/low-memory
+```
+
+The default model has about 40 million parameters. FP32 parameters, gradients, and AdamW's two
+FP32 moment tensors account for about 638 MB (608 MiB) before activations, CUDA context, temporary
+workspaces, and allocator overhead. BF16 autocast does not make this a reliable peak-VRAM estimate.
+Use the short profile command with the same batch and context settings to measure the target device:
+
+```powershell
+uv run tinyllm profile-training --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=1 --warmup-steps 2 --steps 3 --output runs/smoke/profile.json
+```
+
+This profile's `--warmup-steps` controls profiler warmup; `training.warmup_steps` controls the
+learning-rate schedule. Reduce micro-batch size or context length first when CUDA memory is tight.
+Gradient accumulation can recover tokens per optimizer step but does not make an oversized
+micro-batch fit.
+
+#### Small, repeatable sweep
+
+Vary one parameter at a time. For a learning-rate sweep, keep seed, token budget, context, effective
+batch, precision, data split, and evaluation budget fixed. Give every run its own output paths; never
+resume one candidate from another candidate's checkpoint.
+
+```powershell
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=8 --set training.max_steps=200 --set training.warmup_steps=10 --set training.seed=1337 --set training.learning_rate=0.0001 --set training.checkpoint_dir=checkpoints/sweep/lr-0001 --set logging.run_dir=runs/sweep/lr-0001
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=8 --set training.max_steps=200 --set training.warmup_steps=10 --set training.seed=1337 --set training.learning_rate=0.0002 --set training.checkpoint_dir=checkpoints/sweep/lr-0002 --set logging.run_dir=runs/sweep/lr-0002
+uv run tinyllm train --config configs/tinyllm.yaml --set model.max_seq_len=128 --set training.micro_batch_size=1 --set training.gradient_accumulation_steps=8 --set training.max_steps=200 --set training.warmup_steps=10 --set training.seed=1337 --set training.learning_rate=0.0003 --set training.checkpoint_dir=checkpoints/sweep/lr-0003 --set logging.run_dir=runs/sweep/lr-0003
+```
+
+Each candidate processes 204,800 training tokens. Evaluate all checkpoints on the same validation
+split and token budget. For example:
+
+```powershell
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0001/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0001/eval.json
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0002/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0002/eval.json
+uv run tinyllm evaluate --config configs/tinyllm.yaml --set model.max_seq_len=128 --checkpoint checkpoints/sweep/lr-0003/latest.pt --tokens 8192 --seed 42 --output runs/sweep/lr-0003/eval.json
+```
+
+Compare validation loss, its batch variation, tokens/second, and peak VRAM together. A short run is noisy: do not auto-select a winner
+from one score. Rerun the shortlist for a larger token budget and, where compute allows, more than
+one seed. Test weight decay or warmup only in a separate sweep after choosing a reasonable learning
+rate range.
+
 ### Training metrics
 
 Each training report appends one record to `runs/metrics.jsonl` and one row to
