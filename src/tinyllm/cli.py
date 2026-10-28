@@ -213,7 +213,6 @@ def _build_parser() -> argparse.ArgumentParser:
     compare_local_llama.add_argument("--device")
     compare_local_llama.set_defaults(handler=_compare_local_llama_command)
 
-
     generate_parser = commands.add_parser("generate", help="generate text from a checkpoint")
     _add_config_arguments(generate_parser, default=None)
     generate_parser.add_argument("--checkpoint", type=Path, required=True)
