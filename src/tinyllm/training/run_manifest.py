@@ -42,6 +42,14 @@ def _runtime_metadata() -> dict[str, str]:
             runtime[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             continue
+    try:
+        import torch
+    except ImportError:
+        pass
+    else:
+        cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+        if cuda_version:
+            runtime["cuda"] = str(cuda_version)
     return runtime
 
 
@@ -110,6 +118,26 @@ def _artifact_digests(config: TinyLLMConfig, args: argparse.Namespace) -> dict[s
     for name, path in sorted(candidates.items()):
         with path.open("rb") as artifact:
             digests[name] = hashlib.file_digest(artifact, "sha256").hexdigest()
+    corpus_manifest = config.data.output_dir / "manifest.json"
+    try:
+        corpus = json.loads(corpus_manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return digests
+    if not isinstance(corpus, dict):
+        return digests
+    manifest_digest = _file_sha256(corpus_manifest)
+    if manifest_digest is not None:
+        digests["data.corpus_manifest"] = manifest_digest
+    tokenizer_digest = corpus.get("tokenizer_sha256")
+    if isinstance(tokenizer_digest, str):
+        digests["data.tokenizer"] = tokenizer_digest
+    corpus_artifacts = corpus.get("artifacts")
+    if isinstance(corpus_artifacts, dict):
+        for split, artifact in corpus_artifacts.items():
+            if isinstance(split, str) and isinstance(artifact, dict):
+                digest = artifact.get("sha256")
+                if isinstance(digest, str) and len(digest) == 64:
+                    digests[f"data.{split}_tokens"] = digest
     return digests
 
 
@@ -145,6 +173,9 @@ def start_run_manifest(
         previous_path, previous = loaded_manifests[0]
         if previous_path == manifest_path:
             current_manifest = previous
+    if manifest_path.is_file() and current_manifest is None:
+        invalid_archive = run_root / f"run-invalid-{uuid.uuid4().hex}.json"
+        shutil.copy2(manifest_path, invalid_archive)
 
     resume_path = getattr(args, "resume", None)
     resume_sha = _file_sha256(resume_path) if isinstance(resume_path, Path) else None
@@ -208,6 +239,8 @@ def _archive_current_manifest(path: Path, payload: Mapping[str, object]) -> None
     run_id = payload.get("run_id")
     if not isinstance(run_id, str) or not path.is_file():
         return
+    if len(run_id) != 32 or any(char not in "0123456789abcdef" for char in run_id):
+        run_id = uuid.uuid4().hex
     archive_path = path.parent / f"run-{run_id}.json"
     if archive_path.exists():
         archive_path = path.parent / f"run-{run_id}-{uuid.uuid4().hex[:8]}.json"
