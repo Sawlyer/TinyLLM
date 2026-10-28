@@ -194,7 +194,24 @@ def test_benchmark_reuses_identical_batches_and_emits_machine_readable_results(
     assert len(metrics.cleared_devices) == 2
 
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["format_version"] == 2
+    assert payload["format_version"] == 3
+    assert payload["configuration"] == {
+        "batch_size": 2,
+        "compile": False,
+        "device": "cpu",
+        "learning_rate": 0.01,
+        "measured_steps": 2,
+        "model": _model_config().model_dump(mode="json"),
+        "seed": 1337,
+        "sequence_length": 4,
+        "warmup_steps": 1,
+        "weight_decay": 0.0,
+    }
+    assert payload["environment"]["device"] == "cpu"
+    assert payload["environment"]["python_version"]
+    assert payload["environment"]["platform"]
+    assert payload["environment"]["torch_version"] == str(torch.__version__)
+    assert "cuda_runtime_version" in payload["environment"]
     assert payload["results"] == [result.to_dict() for result in results]
 
 
