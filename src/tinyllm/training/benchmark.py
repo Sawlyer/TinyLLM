@@ -6,9 +6,10 @@ import copy
 import json
 import math
 import os
+import platform
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol
@@ -26,7 +27,7 @@ from tinyllm.training.capabilities import (
 )
 from tinyllm.training.precision import PrecisionPolicy, PrecisionUnavailableError
 
-BENCHMARK_FORMAT_VERSION = 2
+BENCHMARK_FORMAT_VERSION = 3
 _PRECISION_MODES = frozenset({"bf16", "fp16", "fp32", "fp8"})
 
 
@@ -232,7 +233,7 @@ def benchmark_precision(
             )
         except PrecisionUnavailableError as error:
             result = _unmeasured_result(config, mode, "unsupported", str(error))
-        except BenchmarkExecutionError as error:
+        except (BenchmarkExecutionError, RuntimeError) as error:
             reason = f"{type(error).__name__}: {error}"
             result = _unmeasured_result(config, mode, "failed", reason)
         results.append(result)
@@ -240,9 +241,49 @@ def benchmark_precision(
         write_benchmark_results(
             config.output_path,
             results,
+            configuration=_benchmark_configuration(config, device),
+            environment=_benchmark_environment(device),
             overwrite=config.overwrite_output,
         )
     return results
+
+
+def _benchmark_configuration(
+    config: PrecisionBenchmarkConfig, device: torch.device
+) -> dict[str, object]:
+    return {
+        "model": config.model.model_dump(mode="json"),
+        "device": str(device),
+        "batch_size": config.batch_size,
+        "sequence_length": config.sequence_length,
+        "warmup_steps": config.warmup_steps,
+        "measured_steps": config.measured_steps,
+        "seed": config.seed,
+        "learning_rate": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "compile": config.compile,
+    }
+
+
+def _benchmark_environment(device: torch.device) -> dict[str, object]:
+    environment: dict[str, object] = {
+        "device": str(device),
+        "platform": platform.platform(),
+        "processor": platform.processor() or None,
+        "python_version": platform.python_version(),
+        "torch_version": str(torch.__version__),
+        "cuda_runtime_version": torch.version.cuda,
+    }
+    if device.type == "cuda":
+        properties = torch.cuda.get_device_properties(device)
+        environment.update(
+            {
+                "gpu_name": torch.cuda.get_device_name(device),
+                "gpu_capability": list(torch.cuda.get_device_capability(device)),
+                "gpu_total_memory_bytes": int(properties.total_memory),
+            }
+        )
+    return environment
 
 
 def _unmeasured_result(
@@ -272,6 +313,8 @@ def write_benchmark_results(
     path: Path,
     results: Sequence[BenchmarkResult],
     *,
+    configuration: Mapping[str, object],
+    environment: Mapping[str, object],
     overwrite: bool = False,
 ) -> None:
     """Atomically persist strict JSON benchmark output."""
@@ -282,6 +325,8 @@ def write_benchmark_results(
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     payload = {
         "format_version": BENCHMARK_FORMAT_VERSION,
+        "configuration": dict(configuration),
+        "environment": dict(environment),
         "results": [result.to_dict() for result in results],
     }
     try:
