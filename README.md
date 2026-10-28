@@ -151,6 +151,27 @@ step numbers remain distinguishable. Steps increase within each session.
   CUDA memory since the last reset. `cuda_free_memory_bytes` and `cuda_total_memory_bytes` record
   free and total CUDA memory at report time; CUDA fields are absent on CPU runs.
 
+### Reproducible evaluation
+
+Evaluation defaults to the validation split, 8 batches, and seed 42. Each batch samples token
+windows with replacement from the selected corpus split. The local evaluation generator leaves
+training loader state unchanged. `--tokens` requests an exact target-token count; the last window
+is shortened when needed. Every target token, including EOS, contributes to loss. The model's
+causal attention mask remains active.
+
+```powershell
+uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --split validation --batches 8 --seed 42
+uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --split validation --tokens 100000 --seed 42 --output runs/evaluation.json
+uv run tinyllm evaluate --config configs/tinyllm.yaml --checkpoint checkpoints/resumed.pt --split validation --tokens 100000 --seed 42 --output runs/evaluation.csv
+```
+
+Reports include checkpoint and selected corpus SHA-256, split, seed, requested and actual token
+counts, batch count, mean next-token loss, population standard deviation across batch mean losses,
+and perplexity. Loss and its dispersion use nats per predicted token; perplexity is the exponential
+of token-weighted mean loss and has no unit. JSON and CSV output refuse to replace an existing file
+unless `--overwrite` is passed. Human-readable lines go to stderr; stdout remains one JSON object
+for scripts. The JSON keeps the existing `validation_loss` and `validation_perplexity` fields.
+
 One-off overrides use validated dotted YAML scalars:
 
 ```powershell
