@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
+import os
 import random
+import shutil
 import signal
 import sys
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
@@ -25,13 +28,21 @@ from tinyllm.data.validation import validate_manifest_for_model, validate_tokeni
 from tinyllm.errors import DeviceUnavailableError, TinyLLMUserError
 from tinyllm.inference.generate import generate
 from tinyllm.inference.quantize import load_quantized_checkpoint, quantize_checkpoint
-from tinyllm.model.transformer import TinyLLM, count_parameters
+from tinyllm.model.transformer import TinyLLM, count_parameters_for_config
 from tinyllm.training.benchmark import PrecisionBenchmarkConfig, benchmark_precision
-from tinyllm.training.checkpoint import load_model_checkpoint
+from tinyllm.training.checkpoint import (
+    ArtifactIdentity,
+    TrainingState,
+    load_model_checkpoint,
+)
+from tinyllm.training.checkpoint import (
+    load_checkpoint as load_training_checkpoint,
+)
 from tinyllm.training.evaluation import evaluate_model, write_evaluation_report
 from tinyllm.training.metrics import MetricLogger
+from tinyllm.training.precision import PrecisionPolicy
 from tinyllm.training.run_manifest import finish_run_manifest, start_run_manifest
-from tinyllm.training.trainer import Trainer
+from tinyllm.training.trainer import Trainer, _resolve_device
 
 DEFAULT_CONFIG = Path("configs/tinyllm.yaml")
 
@@ -179,18 +190,29 @@ def _prepare_command(args: argparse.Namespace) -> None:
 
 def _train_command(args: argparse.Namespace) -> None:
     config = _load_args_config(args)
-    if args.dry_run:
-        _print_train_dry_run(config)
-        return
-    checkpoint = args.checkpoint or config.training.checkpoint_dir / "latest.pt"
-    _require_writable_output(checkpoint, overwrite=args.overwrite, label="checkpoint")
-    manifest_path, manifest = start_run_manifest(
-        config, args, started_at=_utc_timestamp()
+    precision_policy_sink: list[PrecisionPolicy] = []
+    report = _build_training_preflight_report(
+        config,
+        args,
+        require_data=not args.dry_run,
+        dry_run=args.dry_run,
+        precision_policy_sink=precision_policy_sink,
     )
+    if args.dry_run:
+        print(json.dumps(report, sort_keys=True))
+        return
+    if report["status"] == "error":
+        print(json.dumps(report, sort_keys=True), file=sys.stderr)
+        raise ValueError("training preflight failed; see errors in the JSON report")
+    checkpoint = args.checkpoint or config.training.checkpoint_dir / "latest.pt"
+    manifest_path, manifest = start_run_manifest(config, args, started_at=_utc_timestamp())
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
     status = "failed"
     try:
-        trainer, _ = _build_cli_trainer(config)
+        if precision_policy_sink:
+            trainer, _ = _build_cli_trainer(config, precision_policy=precision_policy_sink[0])
+        else:
+            trainer, _ = _build_cli_trainer(config)
         if isinstance(trainer, Trainer) and trainer.metric_logger is None:
             trainer.metric_logger = MetricLogger(
                 config.logging.run_dir,
@@ -233,7 +255,7 @@ def _train_command(args: argparse.Namespace) -> None:
 
 
 def _utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _handle_sigterm(signum: int, _frame: object) -> None:
@@ -459,51 +481,389 @@ def _quantize_command(args: argparse.Namespace) -> None:
     print(json.dumps({"output": str(output), "manifest": manifest.to_dict()}, sort_keys=True))
 
 
-def _print_train_dry_run(config: TinyLLMConfig) -> None:
+def _build_training_preflight_report(
+    config: TinyLLMConfig,
+    args: argparse.Namespace | None = None,
+    *,
+    require_data: bool,
+    dry_run: bool = False,
+    precision_policy_sink: list[PrecisionPolicy] | None = None,
+) -> dict[str, object]:
+    args = args or argparse.Namespace(checkpoint=None, resume=None, overwrite=False, max_steps=None)
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    fp8_requested = False
+
+    def issue(
+        target: list[dict[str, str]], field: str, path: Path | None, cause: str, fix: str
+    ) -> None:
+        target.append(
+            {
+                "field": field,
+                "path": str(path) if path is not None else "",
+                "cause": cause,
+                "fix": fix,
+            }
+        )
+
+    try:
+        device = _resolve_device(config.training.device)
+        if device.type == "cuda" and device.index is not None:
+            count = torch.cuda.device_count()
+            if device.index >= count:
+                raise RuntimeError(f"{device} requested but only {count} available CUDA device(s)")
+    except (RuntimeError, ValueError, TypeError) as error:
+        device = None
+        issue(
+            errors,
+            "training.device",
+            None,
+            str(error),
+            "Select an available device such as cpu, cuda, or cuda:N.",
+        )
+
+    if device is not None:
+        precision = config.training.precision.lower()
+        try:
+            if precision == "fp8":
+                fp8_requested = True
+                if device.type != "cuda" or not torch.cuda.is_available():
+                    raise ValueError("FP8 requires an available CUDA device")
+                if device.index is not None and device.index >= torch.cuda.device_count():
+                    raise ValueError(f"FP8 CUDA device index {device.index} is unavailable")
+                capability = torch.cuda.get_device_capability(device)
+                if capability < (8, 9):
+                    raise ValueError(
+                        f"FP8 requires CUDA compute capability 8.9+, found {capability}"
+                    )
+                if not hasattr(torch, "compile"):
+                    raise ValueError("FP8 requires torch.compile")
+                if importlib.util.find_spec("torchao") is None:
+                    raise ValueError("FP8 requires the optional torchao package")
+                if dry_run:
+                    issue(
+                        warnings,
+                        "training.precision",
+                        None,
+                        "FP8 kernel probe deferred; dry-run does not compile kernels",
+                        "Run training on target GPU to validate FP8 kernel and TorchAO conversion.",
+                    )
+            else:
+                PrecisionPolicy.create(precision, device)
+        except (RuntimeError, ValueError, ImportError, TinyLLMUserError) as error:
+            issue(
+                errors,
+                "training.precision",
+                None,
+                str(error),
+                "Choose a supported precision for the selected device.",
+            )
+
     manifest_path = _manifest_path(config)
-    expected_steps = config.training.max_steps
+    manifest: CorpusManifest | None = None
+    train_dataset: TokenDataset | None = None
     if manifest_path.is_file():
-        manifest = _validated_manifest(config)
-        dataset_identity = (
-            f"validated manifest {manifest.dataset_name}@{manifest.dataset_revision} "
-            f"fingerprint={manifest.dataset_fingerprint} "
-            f"tokenizer_sha256={manifest.tokenizer_sha256} "
-            f"train_sha256={manifest.artifacts['train'].sha256}"
+        try:
+            manifest = _validated_manifest(config)
+            train_dataset = _dataset(config, manifest, "train", required=True)
+            _dataset(config, manifest, "validation", required=False)
+        except (OSError, ValueError, KeyError) as error:
+            issue(
+                errors,
+                "data.manifest",
+                manifest_path,
+                str(error),
+                "Run `tinyllm inspect-data` and prepare compatible corpus artifacts.",
+            )
+            train_dataset = None
+    elif require_data:
+        issue(
+            errors,
+            "data.manifest",
+            manifest_path,
+            "prepared corpus manifest is missing",
+            "Run `tinyllm prepare` with this configuration before training.",
         )
     else:
-        requested_revision = config.data.dataset_revision or "latest resolved by prepare"
-        dataset_identity = (
-            f"validated config {config.data.dataset_name}@{requested_revision}; "
-            "prepared artifacts not present"
+        issue(
+            warnings,
+            "data.manifest",
+            manifest_path,
+            "prepared corpus is absent; dry-run will not download or create it",
+            "Run `tinyllm prepare` before training.",
         )
-    model = TinyLLM(config.model)
-    total_parameters, trainable_parameters = count_parameters(model)
-    effective_sequences = (
-        config.training.micro_batch_size * config.training.gradient_accumulation_steps
-    )
-    effective_tokens = effective_sequences * config.model.max_seq_len
-    if manifest_path.is_file():
-        total_documents = sum(manifest.document_counts.values())
-        expected_steps = math.ceil(
-            total_documents * (1.0 - config.data.validation_fraction)
-            / effective_sequences
+
+    checkpoint = args.checkpoint or config.training.checkpoint_dir / "latest.pt"
+    requested_steps = getattr(args, "max_steps", None)
+    steps = config.training.max_steps if requested_steps is None else requested_steps
+    if type(steps) is not int or steps <= 0 or steps > config.training.max_steps:
+        issue(
+            errors,
+            "training.max_steps",
+            None,
+            f"requested steps {steps!r} must be between 1 and {config.training.max_steps}",
+            "Choose --max-steps within the configured training limit.",
         )
-    device = config.training.device
-    if device == "cuda":
-        device = "cuda (RTX 5080 target; availability not probed during dry-run)"
-    print(f"dataset identity: {dataset_identity}")
-    print(
-        "parameters: "
-        f"{total_parameters:,} total ({total_parameters / 1_000_000:.2f}M), "
-        f"{trainable_parameters:,} trainable"
+    if args.resume is not None and not Path(args.resume).is_file():
+        issue(
+            errors,
+            "resume",
+            Path(args.resume),
+            "resume checkpoint does not exist",
+            "Provide an existing compatible checkpoint or omit --resume.",
+        )
+    elif (
+        args.resume is not None
+        and train_dataset is not None
+        and manifest is not None
+        and not errors
+    ):
+        try:
+            train_artifact = manifest.artifacts["train"]
+            expected_identity = ArtifactIdentity(
+                model_config=config.model.model_dump(mode="json"),
+                tokenizer_sha256=manifest.tokenizer_sha256,
+                corpus_sha256=train_artifact.sha256,
+            )
+            state = load_training_checkpoint(Path(args.resume), expected_identity)
+            _validate_resume_preflight(
+                config,
+                train_dataset,
+                state,
+                max_steps=steps,
+                device=device,
+            )
+        except (OSError, ValueError, TypeError, TinyLLMUserError) as error:
+            issue(
+                errors,
+                "resume",
+                Path(args.resume),
+                str(error),
+                "Use a readable checkpoint matching model, data, tokenizer, and training settings.",
+            )
+    if checkpoint.exists() and not args.overwrite:
+        issue(
+            errors,
+            "checkpoint",
+            checkpoint,
+            "output checkpoint already exists",
+            "Choose another --checkpoint path or pass --overwrite.",
+        )
+
+    parameters = count_parameters_for_config(config.model)
+    checkpoint_bytes = parameters * 12 + 16 * 1024 * 1024
+    interval_count = steps // config.logging.checkpoint_interval
+    checkpoint_storage = checkpoint_bytes * (interval_count + 3)
+    estimated_bytes = checkpoint_storage + checkpoint_bytes
+    if not args.overwrite:
+        for step in range(
+            config.logging.checkpoint_interval, steps + 1, config.logging.checkpoint_interval
+        ):
+            periodic_checkpoint = config.training.checkpoint_dir / f"step-{step:08d}.pt"
+            if periodic_checkpoint.exists():
+                issue(
+                    errors,
+                    "checkpoint",
+                    periodic_checkpoint,
+                    "periodic checkpoint already exists",
+                    "Choose --overwrite or remove the conflicting checkpoint file.",
+                )
+    output_roots = [checkpoint.parent, config.training.checkpoint_dir, config.logging.run_dir]
+    for output_root in dict.fromkeys(output_roots):
+        probe = output_root
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        if not probe.is_dir():
+            issue(
+                errors,
+                "output_directory",
+                output_root,
+                "an ancestor of the output directory is not a directory",
+                "Choose a writable directory path.",
+            )
+        elif not os.access(probe, os.W_OK):
+            issue(
+                errors,
+                "output_directory",
+                output_root,
+                f"directory is not writable: {probe}",
+                "Grant write access or choose another output directory.",
+            )
+
+    storage_targets = [
+        (config.training.checkpoint_dir, checkpoint_storage),
+        (checkpoint.parent, checkpoint_bytes),
+    ]
+    volumes: dict[str, tuple[Path, int]] = {}
+    for target_path, required_bytes in storage_targets:
+        probe = target_path
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        volume = str(probe.anchor).casefold()
+        prior_path, prior_required = volumes.get(volume, (probe, 0))
+        volumes[volume] = (prior_path, prior_required + required_bytes)
+    for probe, required_bytes in volumes.values():
+        try:
+            free_bytes = shutil.disk_usage(probe).free
+            if free_bytes < required_bytes:
+                issue(
+                    errors,
+                    "storage",
+                    probe,
+                    "estimated checkpoint storage is "
+                    f"{required_bytes} bytes, only {free_bytes} bytes are free",
+                    "Free disk space or reduce training steps/checkpoint frequency.",
+                )
+        except OSError as error:
+            issue(
+                warnings,
+                "storage",
+                probe,
+                f"could not inspect free space: {error}",
+                "Confirm sufficient disk space on the target volume.",
+            )
+
+    if fp8_requested and not dry_run and not errors:
+        try:
+            fp8_policy = PrecisionPolicy.create("fp8", device)
+            if precision_policy_sink is not None:
+                precision_policy_sink.append(fp8_policy)
+        except (RuntimeError, ValueError, ImportError, TinyLLMUserError) as error:
+            issue(
+                errors,
+                "training.precision",
+                None,
+                str(error),
+                "Choose a supported precision for the selected device.",
+            )
+
+    status = "error" if errors else "warning" if warnings else "ok"
+    return {
+        "status": status,
+        "data": {
+            "manifest": str(manifest_path),
+            "available": manifest is not None,
+            "dataset": None if manifest is None else manifest.dataset_name,
+            "revision": None if manifest is None else manifest.dataset_revision,
+        },
+        "model": {"parameter_count": parameters},
+        "training": {
+            "device": str(device) if device is not None else config.training.device,
+            "precision": config.training.precision,
+            "steps": steps,
+            "checkpoint_bytes_estimate": estimated_bytes,
+        },
+        "outputs": {"checkpoint": str(checkpoint), "run_dir": str(config.logging.run_dir)},
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _validate_resume_preflight(
+    config: TinyLLMConfig,
+    train_dataset: TokenDataset,
+    state: TrainingState,
+    *,
+    max_steps: int,
+    device: torch.device,
+) -> None:
+    snapshot = state.config_snapshot
+    model_snapshot = snapshot.get("model")
+    training_snapshot = snapshot.get("training")
+    if not isinstance(model_snapshot, Mapping) or not isinstance(training_snapshot, Mapping):
+        raise ValueError("checkpoint configuration snapshot is invalid")
+    if dict(model_snapshot) != config.model.model_dump(mode="json"):
+        raise ValueError("checkpoint model configuration is incompatible")
+    fields = (
+        "learning_rate",
+        "min_learning_rate",
+        "warmup_steps",
+        "max_steps",
+        "micro_batch_size",
+        "gradient_accumulation_steps",
+        "precision",
+        "weight_decay",
+        "max_grad_norm",
+        "compile",
     )
-    print(
-        f"effective batch: {effective_sequences} sequences, "
-        f"{effective_tokens:,} tokens per optimizer step"
+    current_training = config.training.model_dump(mode="json")
+    for field in fields:
+        if training_snapshot.get(field) != current_training[field]:
+            raise ValueError(f"checkpoint training {field} is incompatible")
+
+    scheduler = dict(state.scheduler_state)
+    if set(scheduler) != {"last_step", "total_steps"} or scheduler.get("last_step") != state.step:
+        raise ValueError("checkpoint scheduler state is inconsistent")
+    if scheduler.get("total_steps") != config.training.max_steps:
+        raise ValueError("checkpoint scheduler configuration is incompatible")
+    if state.step > config.training.max_steps:
+        raise ValueError("checkpoint step exceeds configured total steps")
+    if max_steps <= state.step:
+        raise ValueError("max_steps must be greater than the current checkpoint step")
+    tokens_per_step = (
+        config.training.micro_batch_size
+        * train_dataset.sequence_length
+        * config.training.gradient_accumulation_steps
     )
-    print(f"expected steps: {expected_steps}")
-    print(f"precision: {config.training.precision.upper()}")
-    print(f"device: {device}")
+    if state.tokens_processed != state.step * tokens_per_step:
+        raise ValueError("checkpoint token count is inconsistent with step")
+    train_dataset.validate_state_dict(state.loader_rng_state)
+    random.Random().setstate(state.python_rng_state)
+    torch.Generator(device="cpu").set_state(state.torch_rng_state)
+
+    metadata = dict(state.cuda_rng_metadata)
+    required = {
+        "available",
+        "device_count",
+        "active_device",
+        "training_device_type",
+        "training_device_index",
+    }
+    if set(metadata) != required:
+        raise ValueError("checkpoint CUDA RNG metadata has invalid fields")
+    available = metadata["available"]
+    device_count = metadata["device_count"]
+    active_device = metadata["active_device"]
+    if type(available) is not bool or type(device_count) is not int:
+        raise ValueError("checkpoint CUDA RNG metadata is invalid")
+    if available:
+        if (
+            device_count <= 0
+            or type(active_device) is not int
+            or not 0 <= active_device < device_count
+            or len(state.cuda_rng_states) != device_count
+        ):
+            raise ValueError("checkpoint CUDA RNG metadata is inconsistent")
+    elif device_count != 0 or active_device is not None or state.cuda_rng_states:
+        raise ValueError("checkpoint CUDA RNG metadata is inconsistent")
+    for cuda_state in state.cuda_rng_states:
+        if (
+            cuda_state.device.type != "cpu"
+            or cuda_state.dtype != torch.uint8
+            or cuda_state.numel() == 0
+        ):
+            raise ValueError("checkpoint CUDA RNG state is invalid")
+    cuda_available = torch.cuda.is_available()
+    device_count = torch.cuda.device_count() if cuda_available else 0
+    active_device = torch.cuda.current_device() if cuda_available else None
+    training_device_index = device.index
+    if device.type == "cuda" and training_device_index is None:
+        training_device_index = active_device
+    current_cuda_metadata = {
+        "available": cuda_available,
+        "device_count": device_count,
+        "active_device": active_device,
+        "training_device_type": device.type,
+        "training_device_index": training_device_index,
+    }
+    for field, current_value in current_cuda_metadata.items():
+        if metadata[field] != current_value:
+            raise ValueError(f"checkpoint CUDA/device metadata {field} is incompatible")
+    for device_index, cuda_state in enumerate(state.cuda_rng_states):
+        try:
+            torch.Generator(device=f"cuda:{device_index}").set_state(cuda_state)
+        except RuntimeError as error:
+            raise ValueError("checkpoint CUDA RNG state is invalid") from error
 
 
 def _safe_perplexity(loss: float) -> float:
@@ -532,20 +892,38 @@ def _config_for_checkpoint(
     return TinyLLMConfig.model_validate(dict(snapshot))
 
 
-def _build_trainer(config: TinyLLMConfig) -> tuple[Trainer, TokenDataset | None]:
+def _build_trainer(
+    config: TinyLLMConfig,
+    *,
+    precision_policy: PrecisionPolicy | None = None,
+) -> tuple[Trainer, TokenDataset | None]:
     manifest = _validated_manifest(config)
+    resolved_device = _resolve_device(config.training.device)
+    resolved_precision = precision_policy or PrecisionPolicy.create(
+        config.training.precision, resolved_device
+    )
     train_dataset = _dataset(config, manifest, "train", required=True)
     validation_dataset = _dataset(config, manifest, "validation", required=False)
     random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
     model = TinyLLM(config.model)
-    trainer = Trainer(config, model, train_dataset, validation_dataset)
+    trainer = Trainer(
+        config,
+        model,
+        train_dataset,
+        validation_dataset,
+        precision_policy=resolved_precision,
+    )
     return trainer, validation_dataset
 
 
-def _build_cli_trainer(config: TinyLLMConfig) -> tuple[Trainer, TokenDataset | None]:
+def _build_cli_trainer(
+    config: TinyLLMConfig,
+    *,
+    precision_policy: PrecisionPolicy | None = None,
+) -> tuple[Trainer, TokenDataset | None]:
     try:
-        return _build_trainer(config)
+        return _build_trainer(config, precision_policy=precision_policy)
     except RuntimeError as error:
         message = str(error)
         if message.startswith(("CUDA training requested", "MPS training requested")):
@@ -656,3 +1034,4 @@ def _local_documents(dataset_name: str) -> Iterable[str] | None:
 def _require_writable_output(path: Path, *, overwrite: bool, label: str) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(f"{label} already exists: {path}; pass --overwrite to replace it")
+

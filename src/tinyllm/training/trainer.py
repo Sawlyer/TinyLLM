@@ -47,6 +47,7 @@ class Trainer:
         validation_dataset: TokenDataset | None = None,
         *,
         optimizer: Optimizer | None = None,
+        precision_policy: PrecisionPolicy | None = None,
         metric_logger: MetricLogger | None = None,
         validation_batches: int = 8,
         clock: Callable[[], float] | None = None,
@@ -64,6 +65,11 @@ class Trainer:
 
         self.config = config
         self.device = _resolve_device(config.training.device)
+        self.precision = precision_policy or PrecisionPolicy.create(
+            config.training.precision, self.device
+        )
+        if self.precision.device != self.device:
+            raise ValueError("precision policy device does not match the resolved training device")
         self.model = model.to(self.device)
         self.train_dataset = train_dataset
         self.validation_dataset = validation_dataset
@@ -78,7 +84,6 @@ class Trainer:
         )
         self.validation_batches = validation_batches
         self._clock = time.perf_counter if clock is None else clock
-        self.precision = PrecisionPolicy.create(config.training.precision, self.device)
         self.model = self.precision.prepare_model(self.model)
         self.optimizer = optimizer or build_optimizer(
             self.model,
@@ -641,3 +646,4 @@ def _resolve_device(name: str) -> torch.device:
 
 def _safe_perplexity(loss: float) -> float:
     return math.exp(min(loss, 80.0))
+

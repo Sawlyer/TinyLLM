@@ -105,3 +105,17 @@ def count_parameters(model: nn.Module) -> tuple[int, int]:
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
     return total, trainable
+
+
+def count_parameters_for_config(config: ModelConfig) -> int:
+    """Count TinyLLM parameters from configuration without allocating tensors."""
+    head_dim = config.d_model // config.n_heads
+    kv_width = config.n_kv_heads * head_dim
+    hidden_width = int(config.d_model * config.mlp_ratio)
+    attention = 2 * config.d_model * config.d_model + 2 * kv_width * config.d_model
+    feed_forward = 3 * config.d_model * hidden_width
+    layer_norms = 2 * config.d_model
+    per_layer = attention + feed_forward + layer_norms
+    embeddings_and_final_norm = config.vocab_size * config.d_model + config.d_model
+    return embeddings_and_final_norm + config.n_layers * per_layer
+
