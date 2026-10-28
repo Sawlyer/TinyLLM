@@ -10,7 +10,7 @@ from tinyllm.inference.interactive import InteractiveSession
 
 class FakeTokenizer:
     def encode(self, text: str) -> SimpleNamespace:
-        return SimpleNamespace(ids=[1] if text else [])
+        return SimpleNamespace(ids=[9] if text == "invalid" else [1] if text else [])
 
     def decode(self, token_ids, *, skip_special_tokens: bool) -> str:
         assert skip_special_tokens is False
@@ -136,6 +136,20 @@ def test_interactive_session_omits_configured_stop_sequence(monkeypatch) -> None
 
     assert session.history[0]["response"] == "2"
     assert session.history[0]["generated_tokens"] == 1
+
+
+def test_interactive_session_keeps_running_after_invalid_prompt(monkeypatch) -> None:
+    def fake_generate(_model, input_ids, _generation, *, use_cache):
+        return torch.cat((input_ids, torch.tensor([[5]])), dim=1)
+
+    monkeypatch.setattr("tinyllm.inference.interactive.generate", fake_generate)
+    output: list[str] = []
+    session = make_session(iter(["invalid", "valid", "/quit"]), output)
+
+    session.run()
+
+    assert [record["prompt"] for record in session.history] == ["valid"]
+    assert any("Génération impossible" in line for line in output)
 
 
 def test_interactive_parser_accepts_checkpoint_and_optional_history() -> None:
